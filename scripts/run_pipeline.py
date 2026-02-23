@@ -1,0 +1,459 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+from typing import Dict, List
+
+import netCDF4 as nc
+import numpy as np
+import pandas as pd
+from scipy.spatial import cKDTree
+
+import config
+
+
+def ensure_dirs() -> None:
+    os.makedirs(config.ARTIFACT_ROOT, exist_ok=True)
+    os.makedirs(config.MANIFEST_ROOT, exist_ok=True)
+    os.makedirs(config.FINAL_OUTPUT_DIR, exist_ok=True)
+    for module in config.ALL_MODULES:
+        os.makedirs(module_dir(module), exist_ok=True)
+
+
+def module_dir(module_name: str) -> str:
+    return os.path.join(config.ARTIFACT_ROOT, module_name)
+
+
+def module_manifest_path(module_name: str) -> str:
+    return os.path.join(config.MANIFEST_ROOT, f"{module_name}.json")
+
+
+def save_manifest(module_name: str, payload: Dict) -> None:
+    with open(module_manifest_path(module_name), "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def source_meta(path: str) -> Dict:
+    st = os.stat(path)
+    return {"path": path, "mtime": st.st_mtime, "size": st.st_size}
+
+
+def load_index_master() -> pd.DataFrame:
+    index_path = os.path.join(module_dir("A_index_core"), "index_master.pkl")
+    if not os.path.exists(index_path):
+        raise FileNotFoundError("A_index_core/index_master.pkl not found. Build A_index_core first.")
+    return pd.read_pickle(index_path)
+
+
+def get_batch_ids(index_df: pd.DataFrame) -> List[int]:
+    return sorted(index_df["batch_id"].unique().tolist())
+
+
+def build_index_core() -> None:
+    print("[A_index_core] building...")
+    ds2 = nc.Dataset(config.FILE_PATHS["ds2"])
+    ds10 = nc.Dataset(config.FILE_PATHS["ds10"])
+    ds4 = nc.Dataset(config.FILE_PATHS["ds4"])
+    try:
+        lats = ds2.variables["lat"][:]
+        lons = ds2.variables["lon"][:]
+        landmask = ds2.variables["landmask"][:]
+
+        lat_indices = np.where((lats >= config.LAT2) & (lats <= config.LAT1))[0]
+        lon_indices = np.where((lons >= config.LON1) & (lons <= config.LON2))[0]
+        filtered_coordinates = [(i, j) for i in lat_indices for j in lon_indices if landmask[i, j] == 1]
+
+        query_coords = np.array([(lats[i], lons[j]) for i, j in filtered_coordinates], dtype=float)
+
+        restart_tree = cKDTree(np.vstack((ds10.variables["grid1d_lat"][:], ds10.variables["grid1d_lon"][:])).T)
+        _, restart_indices = restart_tree.query(query_coords, k=1)
+
+        forcing_tree = cKDTree(np.vstack((ds4.variables["LATIXY"][:], ds4.variables["LONGXY"][:])).T)
+        _, forcing_indices = forcing_tree.query(query_coords, k=1)
+
+        rows = []
+        for row_id, (i, j) in enumerate(filtered_coordinates):
+            rows.append(
+                {
+                    "__row_id": row_id,
+                    "batch_id": (row_id // config.BATCH_SIZE) + 1,
+                    "lat_idx": int(i),
+                    "lon_idx": int(j),
+                    "Latitude": float(lats[i]),
+                    "Longitude": float(lons[j]),
+                    "nearest_restart_index": int(restart_indices[row_id]),
+                    "nearest_forcing_index": int(forcing_indices[row_id]),
+                    "gridcell_id": int(restart_indices[row_id]) + 1,
+                }
+            )
+        index_df = pd.DataFrame(rows)
+        out_dir = module_dir("A_index_core")
+        index_df.to_pickle(os.path.join(out_dir, "index_master.pkl"))
+
+        for batch_id, batch_df in index_df.groupby("batch_id", sort=True):
+            batch_df.to_pickle(os.path.join(out_dir, f"batch_{int(batch_id):02d}.pkl"))
+
+        save_manifest(
+            "A_index_core",
+            {
+                "module": "A_index_core",
+                "sources": [
+                    source_meta(config.FILE_PATHS["ds2"]),
+                    source_meta(config.FILE_PATHS["ds10"]),
+                    source_meta(config.FILE_PATHS["ds4"]),
+                ],
+                "rows": int(index_df.shape[0]),
+                "batches": int(index_df["batch_id"].max()),
+            },
+        )
+    finally:
+        ds2.close()
+        ds10.close()
+        ds4.close()
+    print("[A_index_core] done.")
+
+
+def build_ds1_surface() -> None:
+    print("[A_ds1_surface] building...")
+    index_df = load_index_master()
+    ds1 = nc.Dataset(config.FILE_PATHS["ds1"])
+    try:
+        out_dir = module_dir("A_ds1_surface")
+        for batch_id, batch_df in index_df.groupby("batch_id", sort=True):
+            rows = {"__row_id": batch_df["__row_id"].tolist()}
+            for var in config.STATIC_SURFACE_VARS_2D:
+                rows[var] = [float(ds1.variables[var][i, j]) for i, j in zip(batch_df["lat_idx"], batch_df["lon_idx"])]
+            for var in config.STATIC_SURFACE_VARS_3D:
+                rows[var] = [np.asarray(ds1.variables[var][:, i, j], dtype=float).tolist() for i, j in zip(batch_df["lat_idx"], batch_df["lon_idx"])]
+            pd.DataFrame(rows).to_pickle(os.path.join(out_dir, f"batch_{int(batch_id):02d}.pkl"))
+
+        save_manifest("A_ds1_surface", {"module": "A_ds1_surface", "sources": [source_meta(config.FILE_PATHS["ds1"])]})
+    finally:
+        ds1.close()
+    print("[A_ds1_surface] done.")
+
+
+def build_ds2_history_x() -> None:
+    print("[A_ds2_history_x] building...")
+    index_df = load_index_master()
+    ds2 = nc.Dataset(config.FILE_PATHS["ds2"])
+    try:
+        out_dir = module_dir("A_ds2_history_x")
+        for batch_id, batch_df in index_df.groupby("batch_id", sort=True):
+            rows = {"__row_id": batch_df["__row_id"].tolist()}
+            rows["landfrac"] = [float(ds2.variables["landfrac"][i, j]) for i, j in zip(batch_df["lat_idx"], batch_df["lon_idx"])]
+            for var in config.HISTORY_GRID_VARS_2D:
+                rows[var] = [float(ds2.variables[var][0, i, j]) for i, j in zip(batch_df["lat_idx"], batch_df["lon_idx"])]
+            pd.DataFrame(rows).to_pickle(os.path.join(out_dir, f"batch_{int(batch_id):02d}.pkl"))
+
+        save_manifest("A_ds2_history_x", {"module": "A_ds2_history_x", "sources": [source_meta(config.FILE_PATHS["ds2"])]})
+    finally:
+        ds2.close()
+    print("[A_ds2_history_x] done.")
+
+
+def build_h0_list_y() -> None:
+    print("[A_h0_list_y] building...")
+    index_df = load_index_master()
+    h0_paths = config.FILE_PATHS["h0_list"]
+    if not h0_paths:
+        raise ValueError("FILE_PATHS['h0_list'] is empty. Please provide one h0 file path.")
+    ds_h0 = nc.Dataset(h0_paths[0])
+    try:
+        out_dir = module_dir("A_h0_list_y")
+        for batch_id, batch_df in index_df.groupby("batch_id", sort=True):
+            rows = {"__row_id": batch_df["__row_id"].tolist()}
+            for var in config.HISTORY_GRID_VARS_2D:
+                rows[f"Y_{var}"] = [float(ds_h0.variables[var][0, i, j]) for i, j in zip(batch_df["lat_idx"], batch_df["lon_idx"])]
+            pd.DataFrame(rows).to_pickle(os.path.join(out_dir, f"batch_{int(batch_id):02d}.pkl"))
+
+        save_manifest(
+            "A_h0_list_y",
+            {"module": "A_h0_list_y", "sources": [source_meta(h0_paths[0])]},
+        )
+    finally:
+        ds_h0.close()
+    print("[A_h0_list_y] done.")
+
+
+def build_forcing_module(module_name: str, ds_key: str, var_name: str) -> None:
+    print(f"[{module_name}] building...")
+    index_df = load_index_master()
+    ds = nc.Dataset(config.FILE_PATHS[ds_key])
+    try:
+        out_dir = module_dir(module_name)
+        for batch_id, batch_df in index_df.groupby("batch_id", sort=True):
+            rows = {
+                "__row_id": batch_df["__row_id"].tolist(),
+                var_name: [
+                    np.asarray(ds.variables[var_name][idx, :], dtype=float).tolist()
+                    for idx in batch_df["nearest_forcing_index"]
+                ],
+            }
+            pd.DataFrame(rows).to_pickle(os.path.join(out_dir, f"batch_{int(batch_id):02d}.pkl"))
+        save_manifest(module_name, {"module": module_name, "sources": [source_meta(config.FILE_PATHS[ds_key])]})
+    finally:
+        ds.close()
+    print(f"[{module_name}] done.")
+
+
+def _build_grid_maps(ds10: nc.Dataset) -> Dict[str, Dict[int, np.ndarray]]:
+    pft_gridcell_index = ds10.variables["pfts1d_gridcell_index"][:]
+    col_gridcell_index = ds10.variables["cols1d_gridcell_index"][:]
+    unique_ids = np.unique(pft_gridcell_index)
+    pft_map = {int(grid_id): np.where(pft_gridcell_index == grid_id)[0] for grid_id in unique_ids}
+    col_map = {int(grid_id): np.where(col_gridcell_index == grid_id)[0] for grid_id in unique_ids}
+    return {"pft_map": pft_map, "col_map": col_map}
+
+
+def build_ds10_restart_x() -> None:
+    print("[A_ds10_restart_x] building...")
+    index_df = load_index_master()
+    ds10 = nc.Dataset(config.FILE_PATHS["ds10"])
+    try:
+        maps = _build_grid_maps(ds10)
+        pft_map = maps["pft_map"]
+        col_map = maps["col_map"]
+        out_dir = module_dir("A_ds10_restart_x")
+
+        all_vars = config.RESTART_PFT_VARS + config.RESTART_COL_1D_VARS + config.RESTART_COL_2D_VARS
+        x_values = {var: ds10.variables[var][:] for var in all_vars}
+
+        for batch_id, batch_df in index_df.groupby("batch_id", sort=True):
+            rows: Dict[str, List] = {"__row_id": batch_df["__row_id"].tolist()}
+            for var in all_vars:
+                rows[var] = []
+            for gridcell_id in batch_df["gridcell_id"]:
+                pft_idx = pft_map.get(int(gridcell_id), np.array([]))
+                col_idx = col_map.get(int(gridcell_id), np.array([]))
+
+                for var in config.RESTART_PFT_VARS:
+                    rows[var].append(None if pft_idx.size == 0 else np.asarray(x_values[var][pft_idx], dtype=float).tolist())
+                for var in config.RESTART_COL_1D_VARS:
+                    rows[var].append(None if col_idx.size == 0 else np.asarray(x_values[var][col_idx], dtype=float).tolist())
+                for var in config.RESTART_COL_2D_VARS:
+                    rows[var].append(None if col_idx.size == 0 else np.asarray(x_values[var][col_idx, :], dtype=float).tolist())
+
+            pd.DataFrame(rows).to_pickle(os.path.join(out_dir, f"batch_{int(batch_id):02d}.pkl"))
+
+        save_manifest("A_ds10_restart_x", {"module": "A_ds10_restart_x", "sources": [source_meta(config.FILE_PATHS["ds10"])]})
+    finally:
+        ds10.close()
+    print("[A_ds10_restart_x] done.")
+
+
+def build_r_list_y() -> None:
+    print("[A_r_list_y] building...")
+    index_df = load_index_master()
+    ds10 = nc.Dataset(config.FILE_PATHS["ds10"])
+    r_paths = config.FILE_PATHS["r_list"]
+    if not r_paths:
+        raise ValueError("FILE_PATHS['r_list'] is empty. Please provide one r file path.")
+    ds_r = nc.Dataset(r_paths[0])
+    try:
+        maps = _build_grid_maps(ds10)
+        pft_map = maps["pft_map"]
+        col_map = maps["col_map"]
+        out_dir = module_dir("A_r_list_y")
+
+        all_vars = config.RESTART_PFT_VARS + config.RESTART_COL_1D_VARS + config.RESTART_COL_2D_VARS
+        y_values = {var: ds_r.variables[var][:] for var in all_vars}
+
+        for batch_id, batch_df in index_df.groupby("batch_id", sort=True):
+            rows: Dict[str, List] = {"__row_id": batch_df["__row_id"].tolist()}
+            for var in all_vars:
+                rows[f"Y_{var}"] = []
+
+            for gridcell_id in batch_df["gridcell_id"]:
+                pft_idx = pft_map.get(int(gridcell_id), np.array([]))
+                col_idx = col_map.get(int(gridcell_id), np.array([]))
+
+                for var in config.RESTART_PFT_VARS:
+                    if pft_idx.size == 0:
+                        rows[f"Y_{var}"].append(None)
+                    else:
+                        rows[f"Y_{var}"].append(np.asarray(y_values[var][pft_idx], dtype=float).tolist())
+                for var in config.RESTART_COL_1D_VARS:
+                    if col_idx.size == 0:
+                        rows[f"Y_{var}"].append(None)
+                    else:
+                        rows[f"Y_{var}"].append(np.asarray(y_values[var][col_idx], dtype=float).tolist())
+                for var in config.RESTART_COL_2D_VARS:
+                    if col_idx.size == 0:
+                        rows[f"Y_{var}"].append(None)
+                    else:
+                        rows[f"Y_{var}"].append(np.asarray(y_values[var][col_idx, :], dtype=float).tolist())
+
+            pd.DataFrame(rows).to_pickle(os.path.join(out_dir, f"batch_{int(batch_id):02d}.pkl"))
+
+        save_manifest("A_r_list_y", {"module": "A_r_list_y", "sources": [source_meta(r_paths[0])]})
+    finally:
+        ds10.close()
+        ds_r.close()
+    print("[A_r_list_y] done.")
+
+
+def build_clm_params_pft() -> None:
+    print("[A_clm_params_pft] building...")
+    index_df = load_index_master()
+    ds = nc.Dataset(config.FILE_PATHS["clm_params"])
+    try:
+        broadcast_feature_dict = {}
+        for var in config.PFT_TARGET_VARS:
+            if var in ds.variables:
+                vals = ds.variables[var][:17]
+                if not (np.any(np.isnan(vals)) or np.ma.is_masked(vals)):
+                    broadcast_feature_dict[var] = np.asarray(vals, dtype=float).tolist()
+
+        out_dir = module_dir("A_clm_params_pft")
+        for batch_id, batch_df in index_df.groupby("batch_id", sort=True):
+            rows = {"__row_id": batch_df["__row_id"].tolist()}
+            for var, val_list in broadcast_feature_dict.items():
+                rows[f"pft_{var}"] = [val_list] * len(batch_df)
+            pd.DataFrame(rows).to_pickle(os.path.join(out_dir, f"batch_{int(batch_id):02d}.pkl"))
+
+        save_manifest("A_clm_params_pft", {"module": "A_clm_params_pft", "sources": [source_meta(config.FILE_PATHS["clm_params"])]})
+    finally:
+        ds.close()
+    print("[A_clm_params_pft] done.")
+
+
+def calculate_monthly_avg(time_series):
+    if not isinstance(time_series, (list, np.ndarray)):
+        return []
+    if len(time_series) != config.TIME_SERIES_LENGTH:
+        return []
+    monthly_averages = []
+    start_idx = 0
+    for _ in range(config.YEARS_IN_DATA):
+        for month_days in config.DAYS_PER_MONTH:
+            end_idx = start_idx + month_days * config.STEPS_PER_DAY
+            monthly_averages.append(float(np.mean(time_series[start_idx:end_idx])))
+            start_idx = end_idx
+    return monthly_averages
+
+
+def read_module_batch(module_name: str, batch_id: int) -> pd.DataFrame:
+    path = os.path.join(module_dir(module_name), f"batch_{batch_id:02d}.pkl")
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Missing artifact: {path}")
+    return pd.read_pickle(path)
+
+
+def assemble_final_dataset() -> None:
+    print("[Assembler] assembling final dataset...")
+    index_df = load_index_master()
+    batch_ids = get_batch_ids(index_df)
+    forcing_modules = list(config.FORCING_MODULE_MAP.keys())
+    mandatory_modules = [
+        "A_ds1_surface",
+        "A_ds2_history_x",
+        "A_ds10_restart_x",
+        "A_h0_list_y",
+        "A_r_list_y",
+        "A_clm_params_pft",
+    ] + forcing_modules
+
+    for batch_id in batch_ids:
+        merged = read_module_batch("A_index_core", batch_id)[["__row_id", "Latitude", "Longitude"]].copy()
+
+        for module in mandatory_modules:
+            df_mod = read_module_batch(module, batch_id)
+            merged = merged.merge(df_mod, on="__row_id", how="left")
+
+        time_series_columns = ["FLDS", "PSRF", "FSDS", "QBOT", "PRECTmms", "TBOT"]
+        for col in time_series_columns:
+            if col in merged.columns:
+                merged[col] = merged[col].apply(calculate_monthly_avg)
+
+        single_value_columns = [
+            "landfrac", "LANDFRAC_PFT", "PCT_NATVEG", "AREA", "SOIL_COLOR", "SOIL_ORDER",
+            "GPP", "Y_GPP", "HR", "AR", "NPP", "Y_HR", "Y_AR", "Y_NPP",
+            "OCCLUDED_P", "SECONDARY_P", "LABILE_P", "APATITE_P",
+        ]
+        for col in single_value_columns:
+            if col in merged.columns:
+                merged[col] = pd.to_numeric(merged[col].astype(str).str.strip(), errors="coerce")
+
+        for col in ["PCT_NAT_PFT", "PCT_SAND", "PCT_CLAY"]:
+            if col in merged.columns:
+                expanded_cols = merged[col].apply(pd.Series).fillna(0).add_prefix(f"{col}_")
+                merged = merged.drop(columns=[col]).join(expanded_cols)
+
+        y_columns = [col for col in merged.columns if col.startswith("Y_")]
+        other_columns = [col for col in merged.columns if not col.startswith("Y_")]
+        merged = merged[other_columns + y_columns]
+        # Internal join key only; keep output schema aligned with legacy datasets.
+        if "__row_id" in merged.columns:
+            merged = merged.drop(columns=["__row_id"])
+
+        out_path = os.path.join(config.FINAL_OUTPUT_DIR, f"training_data_batch_{batch_id:02d}.pkl")
+        merged.to_pickle(out_path)
+        print(f"[Assembler] saved: {out_path}")
+
+    print("[Assembler] done.")
+
+
+def build_module(module_name: str) -> None:
+    if module_name == "A_index_core":
+        build_index_core()
+    elif module_name == "A_ds1_surface":
+        build_ds1_surface()
+    elif module_name == "A_ds2_history_x":
+        build_ds2_history_x()
+    elif module_name == "A_ds10_restart_x":
+        build_ds10_restart_x()
+    elif module_name == "A_h0_list_y":
+        build_h0_list_y()
+    elif module_name == "A_r_list_y":
+        build_r_list_y()
+    elif module_name == "A_clm_params_pft":
+        build_clm_params_pft()
+    elif module_name in config.FORCING_MODULE_MAP:
+        ds_key, var_name = config.FORCING_MODULE_MAP[module_name]
+        build_forcing_module(module_name, ds_key, var_name)
+    else:
+        raise ValueError(f"Unknown module: {module_name}")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Modular dataset construction by input file")
+    parser.add_argument(
+        "--build",
+        nargs="+",
+        default=[],
+        help="Modules to build. Use 'all' or explicit names like A_forcing_ds7_qbot",
+    )
+    parser.add_argument(
+        "--assemble",
+        action="store_true",
+        help="Assemble final dataset from existing artifacts",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    ensure_dirs()
+
+    to_build = args.build
+    if "all" in to_build:
+        to_build = config.ALL_MODULES.copy()
+
+    if to_build:
+        if "A_index_core" not in to_build:
+            if not os.path.exists(os.path.join(module_dir("A_index_core"), "index_master.pkl")):
+                to_build = ["A_index_core"] + to_build
+        for module_name in to_build:
+            build_module(module_name)
+
+    if args.assemble:
+        assemble_final_dataset()
+
+    if not to_build and not args.assemble:
+        print("No action. Use --build all --assemble, or --build <module>, or --assemble.")
+
+
+if __name__ == "__main__":
+    main()
+
