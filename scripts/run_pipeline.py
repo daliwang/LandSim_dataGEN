@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 import argparse
+import datetime
 import json
 import os
+import re
+import sys
+from pathlib import Path
 from typing import Dict, List
 
 import netCDF4 as nc
@@ -9,7 +13,22 @@ import numpy as np
 import pandas as pd
 from scipy.spatial import cKDTree
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+SRC_DIR = SCRIPT_DIR.parent / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
 import config
+
+try:
+    import xarray as xr
+except Exception:
+    xr = None
+
+try:
+    import cftime
+except Exception:
+    cftime = None
 
 
 def ensure_dirs() -> None:
@@ -36,6 +55,38 @@ def save_manifest(module_name: str, payload: Dict) -> None:
 def source_meta(path: str) -> Dict:
     st = os.stat(path)
     return {"path": path, "mtime": st.st_mtime, "size": st.st_size}
+
+
+def _read_forcing_coords_2d(ds_forcing: nc.Dataset) -> np.ndarray:
+    """
+    Read forcing coordinates in a memory-safe way.
+    Some forcing files store LATIXY/LONGXY with a time dimension; we only need
+    one spatial slice for nearest-neighbor mapping in A_index_core.
+    """
+    if "LATIXY" not in ds_forcing.variables or "LONGXY" not in ds_forcing.variables:
+        raise KeyError("Forcing file must include LATIXY and LONGXY.")
+
+    lat_var = ds_forcing.variables["LATIXY"]
+    lon_var = ds_forcing.variables["LONGXY"]
+
+    def _slice_without_time(var):
+        # Build index tuple dynamically so we do not load full time stacks.
+        idx = []
+        for dim_name in var.dimensions:
+            if dim_name.lower() == "time":
+                idx.append(0)
+            else:
+                idx.append(slice(None))
+        return np.asarray(var[tuple(idx)], dtype=float)
+
+    lat_data = _slice_without_time(lat_var)
+    lon_data = _slice_without_time(lon_var)
+
+    if lat_data.ndim == 1 and lon_data.ndim == 1:
+        return np.column_stack((lat_data, lon_data))
+    if lat_data.ndim == 2 and lon_data.ndim == 2:
+        return np.column_stack((lat_data.reshape(-1), lon_data.reshape(-1)))
+    raise ValueError(f"Unsupported forcing coord shapes: {lat_data.shape}, {lon_data.shape}")
 
 
 def load_index_master() -> pd.DataFrame:
@@ -68,7 +119,8 @@ def build_index_core() -> None:
         restart_tree = cKDTree(np.vstack((ds10.variables["grid1d_lat"][:], ds10.variables["grid1d_lon"][:])).T)
         _, restart_indices = restart_tree.query(query_coords, k=1)
 
-        forcing_tree = cKDTree(np.vstack((ds4.variables["LATIXY"][:], ds4.variables["LONGXY"][:])).T)
+        forcing_coords = _read_forcing_coords_2d(ds4)
+        forcing_tree = cKDTree(forcing_coords)
         _, forcing_indices = forcing_tree.query(query_coords, k=1)
 
         rows = []
@@ -176,24 +228,296 @@ def build_h0_list_y() -> None:
     print("[A_h0_list_y] done.")
 
 
+def _resolve_datm_files(var_name: str) -> List[str]:
+    direct_path = config.DATM_FORCING_PATHS.get(var_name, "").strip()
+    if direct_path:
+        if not os.path.exists(direct_path):
+            raise FileNotFoundError(f"DATM forcing file not found for {var_name}: {direct_path}")
+        return [direct_path]
+
+    datm_root = (config.DATM_ROOT or "").strip()
+    if not datm_root:
+        raise ValueError(f"DATM_ROOT is empty and DATM_{var_name}_PATH is not set.")
+    if not os.path.isdir(datm_root):
+        raise FileNotFoundError(f"DATM_ROOT does not exist: {datm_root}")
+
+    token = config.DATM_TOKEN_MAP.get(var_name, "").strip()
+    if not token:
+        raise ValueError(f"No DATM token configured for forcing variable: {var_name}")
+
+    pattern = re.compile(rf"(?:.*_)?clmforc\..*\.{re.escape(token)}\.(\d{{4}})-(\d{{2}})\.nc$")
+    files_by_month: Dict[tuple, List[str]] = {}
+    for root, _, names in os.walk(datm_root):
+        for name in names:
+            match = pattern.match(name)
+            if not match:
+                continue
+            year = int(match.group(1))
+            month = int(match.group(2))
+            if not (config.DATM_START_YEAR <= year <= config.DATM_END_YEAR):
+                continue
+            key = (year, month)
+            files_by_month.setdefault(key, []).append(os.path.join(root, name))
+
+    files: List[str] = []
+    for year in range(config.DATM_START_YEAR, config.DATM_END_YEAR + 1):
+        for month in range(1, 13):
+            key = (year, month)
+            candidates = sorted(files_by_month.get(key, []))
+            if not candidates:
+                print(f"[ForcingPrep] warning: missing DATM file for {var_name} {year}-{month:02d}")
+                continue
+            if len(candidates) > 1:
+                print(f"[ForcingPrep] warning: multiple DATM files for {var_name} {year}-{month:02d}; using {candidates[0]}")
+            files.append(candidates[0])
+
+    if not files:
+        raise FileNotFoundError(f"No DATM files found for {var_name} in {datm_root}")
+    return files
+
+
+def _preprocessed_forcing_output_dir() -> str:
+    year_tag = f"{config.DATM_START_YEAR}_{config.DATM_END_YEAR}"
+    return os.path.join(config.BASE_OUTPUT_ROOT, f"forcing_netcdf_datm_{year_tag}")
+
+
+def _preprocessed_forcing_path(var_name: str) -> str:
+    year_tag = f"{config.DATM_START_YEAR}-{config.DATM_END_YEAR}"
+    return os.path.join(_preprocessed_forcing_output_dir(), f"{var_name}_{year_tag}.nc")
+
+
+def _flatten_spatial_coords(ds: "xr.Dataset"):
+    lat_name = "LATIXY" if "LATIXY" in ds else ("lat" if "lat" in ds else None)
+    lon_name = "LONGXY" if "LONGXY" in ds else ("lon" if "lon" in ds else None)
+    if lat_name is None or lon_name is None:
+        raise KeyError("DATM forcing dataset must include LATIXY/LONGXY or lat/lon.")
+
+    lat_data = np.asarray(ds[lat_name].values, dtype=float)
+    lon_data = np.asarray(ds[lon_name].values, dtype=float)
+
+    if lat_data.ndim == 3 and lon_data.ndim == 3:
+        lat_data = lat_data[0, :, :]
+        lon_data = lon_data[0, :, :]
+    elif lat_data.ndim == 2 and lon_data.ndim == 2:
+        pass
+    elif lat_data.ndim == 1 and lon_data.ndim == 1:
+        pass
+    else:
+        raise ValueError(f"Unsupported DATM coordinate shapes: {lat_data.shape}, {lon_data.shape}")
+
+    return lat_data.reshape(-1), lon_data.reshape(-1)
+
+
+def _monthly_mean_series_from_datm_files(var_name: str, datm_files: List[str]):
+    if xr is None:
+        raise ImportError("xarray is required to preprocess DATM forcing files.")
+
+    monthly_values = []
+    lat_flat = None
+    lon_flat = None
+
+    for fp in datm_files:
+        with xr.open_dataset(fp, decode_times=False) as ds:
+            if var_name not in ds:
+                raise KeyError(f"Variable {var_name} not found in DATM file: {fp}")
+            if lat_flat is None or lon_flat is None:
+                lat_flat, lon_flat = _flatten_spatial_coords(ds)
+
+            da = ds[var_name]
+            if "time" not in da.dims:
+                raise ValueError(f"{var_name} has no time dimension in file: {fp}")
+            mean_da = da.mean(dim="time", skipna=True)
+            monthly_values.append(np.asarray(mean_da.values, dtype=float).reshape(-1))
+
+    if not monthly_values:
+        raise ValueError(f"No monthly DATM files collected for {var_name}")
+
+    series = np.stack(monthly_values, axis=0)  # (n_months, n_grid)
+    if lat_flat is None or lon_flat is None:
+        raise ValueError("Failed to read DATM spatial coordinates.")
+    if series.shape[1] != lat_flat.shape[0] or series.shape[1] != lon_flat.shape[0]:
+        raise ValueError("Spatial size mismatch between forcing data and coordinates.")
+    return series, lat_flat, lon_flat
+
+
+def prepare_forcing_inputs_from_datm(force_rebuild: bool = False) -> None:
+    """
+    Build consolidated forcing NetCDF files (DS4~DS9) from DATM monthly files.
+    This mirrors the Zhuowei workflow so downstream modules can reuse stable
+    intermediate forcing artifacts.
+    """
+    if config.FORCING_MODE != "datm":
+        return
+    if xr is None:
+        raise ImportError("xarray is required to preprocess DATM forcing files.")
+
+    var_to_ds_key = {
+        "FLDS": "ds4",
+        "PSRF": "ds5",
+        "FSDS": "ds6",
+        "QBOT": "ds7",
+        "PRECTmms": "ds8",
+        "TBOT": "ds9",
+    }
+    out_dir = _preprocessed_forcing_output_dir()
+    os.makedirs(out_dir, exist_ok=True)
+
+    for var_name, ds_key in var_to_ds_key.items():
+        target_path = _preprocessed_forcing_path(var_name)
+
+        if not force_rebuild and os.path.exists(target_path):
+            config.FILE_PATHS[ds_key] = target_path
+            print(f"[ForcingPrep] reuse existing {var_name}: {target_path}")
+            continue
+
+        datm_files = _resolve_datm_files(var_name)
+        print(f"[ForcingPrep] building {var_name} -> {target_path}")
+
+        series, lat_flat, lon_flat = _monthly_mean_series_from_datm_files(var_name, datm_files)
+        n_months, n_grid = series.shape
+        time_index = np.arange(n_months, dtype=np.int32)
+        grid_ids = np.arange(n_grid, dtype=np.int32)
+
+        ds_out = xr.Dataset(
+            data_vars={
+                var_name: (("time", "gridcell"), series.astype(np.float32)),
+                "LATIXY": (("gridcell",), lat_flat.astype(np.float32)),
+                "LONGXY": (("gridcell",), lon_flat.astype(np.float32)),
+                "gridID": (("gridcell",), grid_ids),
+            },
+            coords={
+                "time": time_index,
+                "gridcell": grid_ids,
+            },
+            attrs={
+                "description": "Monthly-mean forcing generated from DATM monthly files",
+                "start_year": int(config.DATM_START_YEAR),
+                "end_year": int(config.DATM_END_YEAR),
+            },
+        )
+
+        encoding = {
+            var_name: {"zlib": True, "complevel": 4, "dtype": "float32"},
+            "LATIXY": {"zlib": True, "complevel": 4, "dtype": "float32", "_FillValue": np.nan},
+            "LONGXY": {"zlib": True, "complevel": 4, "dtype": "float32", "_FillValue": np.nan},
+            "gridID": {"dtype": "int32"},
+            "time": {"dtype": "int32"},
+        }
+        ds_out.to_netcdf(target_path, encoding=encoding)
+
+        config.FILE_PATHS[ds_key] = target_path
+        print(f"[ForcingPrep] done {var_name}")
+
+
+def _build_datm_spatial_mapping(ds: "xr.Dataset", index_df: pd.DataFrame):
+    lat_name = "LATIXY" if "LATIXY" in ds else "lat"
+    lon_name = "LONGXY" if "LONGXY" in ds else "lon"
+    if lat_name not in ds or lon_name not in ds:
+        raise KeyError("DATM forcing dataset must include LATIXY/LONGXY or lat/lon.")
+
+    lat_data = np.asarray(ds[lat_name].values, dtype=float)
+    lon_data = np.asarray(ds[lon_name].values, dtype=float)
+
+    if lat_data.ndim == 1 and lon_data.ndim == 1:
+        lon_grid, lat_grid = np.meshgrid(lon_data, lat_data)
+        lat_data = lat_grid
+        lon_data = lon_grid
+    elif lat_data.ndim == 3 and lon_data.ndim == 3:
+        lat_data = lat_data[0, :, :]
+        lon_data = lon_data[0, :, :]
+    elif lat_data.ndim != 2 or lon_data.ndim != 2:
+        raise ValueError(f"Unsupported DATM coordinate shapes: {lat_data.shape}, {lon_data.shape}")
+
+    forcing_coords = np.column_stack((lat_data.reshape(-1), lon_data.reshape(-1)))
+    forcing_tree = cKDTree(forcing_coords)
+    query_coords = index_df[["Latitude", "Longitude"]].to_numpy(dtype=float)
+    _, nearest_indices = forcing_tree.query(query_coords, k=1)
+    return nearest_indices, lat_data.shape
+
+
+def _extract_datm_series_for_batch(var_da, flat_index: int, spatial_shape) -> List[float]:
+    if var_da.ndim == 2:
+        dims = list(var_da.dims)
+        if "time" in dims:
+            other_dim = next(dim for dim in dims if dim != "time")
+            values = var_da.isel({other_dim: int(flat_index)}).values
+        else:
+            # fallback: assume first dimension is time-like
+            values = var_da.isel({dims[1]: int(flat_index)}).values
+        return np.asarray(values, dtype=float).reshape(-1).tolist()
+
+    if var_da.ndim == 3:
+        dims = list(var_da.dims)
+        non_time_dims = [d for d in dims if d != "time"]
+        if len(non_time_dims) != 2:
+            raise ValueError(f"Unsupported DATM variable dims: {dims}")
+        i, j = np.unravel_index(int(flat_index), spatial_shape)
+        values = var_da.isel({non_time_dims[0]: int(i), non_time_dims[1]: int(j)}).values
+        return np.asarray(values, dtype=float).reshape(-1).tolist()
+
+    raise ValueError(f"Unsupported DATM forcing dimensions: {var_da.ndim}")
+
+
 def build_forcing_module(module_name: str, ds_key: str, var_name: str) -> None:
     print(f"[{module_name}] building...")
     index_df = load_index_master()
-    ds = nc.Dataset(config.FILE_PATHS[ds_key])
-    try:
-        out_dir = module_dir(module_name)
-        for batch_id, batch_df in index_df.groupby("batch_id", sort=True):
-            rows = {
-                "__row_id": batch_df["__row_id"].tolist(),
-                var_name: [
-                    np.asarray(ds.variables[var_name][idx, :], dtype=float).tolist()
-                    for idx in batch_df["nearest_forcing_index"]
-                ],
-            }
-            pd.DataFrame(rows).to_pickle(os.path.join(out_dir, f"batch_{int(batch_id):02d}.pkl"))
-        save_manifest(module_name, {"module": module_name, "sources": [source_meta(config.FILE_PATHS[ds_key])]})
-    finally:
-        ds.close()
+    out_dir = module_dir(module_name)
+
+    if config.FORCING_MODE == "datm":
+        ds_path = config.FILE_PATHS[ds_key]
+        if not os.path.exists(ds_path):
+            # Usually run_extraction() has already prepared these files once.
+            # Keep this fallback to support direct module invocation.
+            print(f"[ForcingPrep] missing preprocessed file for {var_name}, preparing now...")
+            prepare_forcing_inputs_from_datm(force_rebuild=False)
+            ds_path = config.FILE_PATHS[ds_key]
+        print(f"[{module_name}] using DATM preprocessed forcing: {ds_path}")
+        ds = nc.Dataset(ds_path)
+        sources = [source_meta(ds_path), {"mode": "datm_preprocessed_monthly"}]
+        try:
+            if var_name not in ds.variables:
+                raise KeyError(f"Variable {var_name} not found in preprocessed forcing file: {ds_path}")
+            arr = ds.variables[var_name]
+            if arr.ndim != 2:
+                raise ValueError(f"Preprocessed forcing var {var_name} must be 2D, got ndim={arr.ndim}")
+
+            dims = list(arr.dimensions)
+            if "gridcell" in dims:
+                grid_axis = dims.index("gridcell")
+            else:
+                # Fallback: assume non-time axis is the grid axis.
+                grid_axis = 1 if dims and dims[0] == "time" else 0
+
+            for batch_id, batch_df in index_df.groupby("batch_id", sort=True):
+                rows = {"__row_id": batch_df["__row_id"].tolist(), var_name: []}
+                for idx in batch_df["nearest_forcing_index"]:
+                    idx = int(idx)
+                    if grid_axis == 1:
+                        series = np.asarray(arr[:, idx], dtype=float).tolist()
+                    else:
+                        series = np.asarray(arr[idx, :], dtype=float).tolist()
+                    rows[var_name].append(series)
+                pd.DataFrame(rows).to_pickle(os.path.join(out_dir, f"batch_{int(batch_id):02d}.pkl"))
+        finally:
+            ds.close()
+    else:
+        ds_path = config.FILE_PATHS[ds_key]
+        ds = nc.Dataset(ds_path)
+        sources = [source_meta(ds_path), {"mode": "legacy"}]
+        try:
+            for batch_id, batch_df in index_df.groupby("batch_id", sort=True):
+                rows = {
+                    "__row_id": batch_df["__row_id"].tolist(),
+                    var_name: [
+                        np.asarray(ds.variables[var_name][idx, :], dtype=float).tolist()
+                        for idx in batch_df["nearest_forcing_index"]
+                    ],
+                }
+                pd.DataFrame(rows).to_pickle(os.path.join(out_dir, f"batch_{int(batch_id):02d}.pkl"))
+        finally:
+            ds.close()
+
+    save_manifest(module_name, {"module": module_name, "sources": sources})
     print(f"[{module_name}] done.")
 
 
@@ -321,6 +645,11 @@ def build_clm_params_pft() -> None:
 def calculate_monthly_avg(time_series):
     if not isinstance(time_series, (list, np.ndarray)):
         return []
+    if len(time_series) == 0:
+        return []
+    # Already monthly sequence (e.g. DATM preprocessed forcing): keep as-is.
+    if len(time_series) % 12 == 0 and len(time_series) != config.TIME_SERIES_LENGTH:
+        return [float(x) for x in np.asarray(time_series, dtype=float).reshape(-1).tolist()]
     if len(time_series) != config.TIME_SERIES_LENGTH:
         return []
     monthly_averages = []
@@ -416,6 +745,24 @@ def build_module(module_name: str) -> None:
         raise ValueError(f"Unknown module: {module_name}")
 
 
+def run_extraction(to_build: List[str]) -> None:
+    modules = to_build
+    if "all" in modules:
+        modules = config.ALL_MODULES.copy()
+    if config.FORCING_MODE == "datm":
+        prepare_forcing_inputs_from_datm(force_rebuild=False)
+    if modules:
+        if "A_index_core" not in modules:
+            if not os.path.exists(os.path.join(module_dir("A_index_core"), "index_master.pkl")):
+                modules = ["A_index_core"] + modules
+        for module_name in modules:
+            build_module(module_name)
+
+
+def run_assembly() -> None:
+    assemble_final_dataset()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Modular dataset construction by input file")
     parser.add_argument(
@@ -429,6 +776,27 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Assemble final dataset from existing artifacts",
     )
+    parser.add_argument(
+        "--forcing-mode",
+        choices=["legacy", "datm"],
+        default=None,
+        help="Override forcing extraction mode from config",
+    )
+    parser.add_argument(
+        "--prepare-forcing",
+        action="store_true",
+        help="Preprocess DATM monthly forcing files into consolidated DS4~DS9 NetCDF files.",
+    )
+    parser.add_argument(
+        "--prepare-forcing-only",
+        action="store_true",
+        help="Only preprocess DATM monthly forcing files and exit.",
+    )
+    parser.add_argument(
+        "--force-rebuild-forcing",
+        action="store_true",
+        help="Rebuild consolidated forcing files even if output files already exist.",
+    )
     return parser.parse_args()
 
 
@@ -436,19 +804,21 @@ def main() -> None:
     args = parse_args()
     ensure_dirs()
 
-    to_build = args.build
-    if "all" in to_build:
-        to_build = config.ALL_MODULES.copy()
+    if args.forcing_mode:
+        config.FORCING_MODE = args.forcing_mode
 
+    if args.prepare_forcing or args.prepare_forcing_only:
+        prepare_forcing_inputs_from_datm(force_rebuild=args.force_rebuild_forcing)
+
+    if args.prepare_forcing_only:
+        return
+
+    to_build = args.build
     if to_build:
-        if "A_index_core" not in to_build:
-            if not os.path.exists(os.path.join(module_dir("A_index_core"), "index_master.pkl")):
-                to_build = ["A_index_core"] + to_build
-        for module_name in to_build:
-            build_module(module_name)
+        run_extraction(to_build)
 
     if args.assemble:
-        assemble_final_dataset()
+        run_assembly()
 
     if not to_build and not args.assemble:
         print("No action. Use --build all --assemble, or --build <module>, or --assemble.")

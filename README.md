@@ -1,102 +1,111 @@
 # Modular Final Dataset Construction
 
-This folder contains a modular pipeline for dataset generation.
+This folder builds training datasets in a modular way:
 
-The design goal is:
+- one artifact per input source,
+- rebuild only changed modules,
+- reuse unchanged artifacts,
+- assemble once into final `training_data_batch_XX.pkl`.
 
-- one artifact per input source file,
-- rebuild only the changed module,
-- reuse all unchanged modules,
-- assemble once to produce the final dataset.
+## New configuration entrypoint
 
-## Output Policy
+Use one text file as the main config source:
 
-There is only one final output directory:
+- `config/CNP_dataInput.txt`
 
-- `/mnt/DATA/0_oak_data/3_dataset_based_construction/final_dataset/`
+It contains:
 
-Final file naming stays consistent:
-
-- `training_data_batch_01.pkl`
-- `training_data_batch_02.pkl`
-- ...
-
-## Core Files
-
-- `config.py`: all input paths, variables, and path settings.
-- `run_pipeline.py`: module build and final assembly entrypoint.
+- variable groups (similar to `CNP_IO_updated9_dev.txt`),
+- input paths and file names,
+- forcing mode switch (`legacy` / `datm`).
 
 
-## Required Modules
 
-- `A_index_core`
-- `A_ds1_surface`
-- `A_ds2_history_x`
-- `A_ds10_restart_x`
-- `A_h0_list_y`
-- `A_r_list_y`
-- `A_forcing_ds4_flds`
-- `A_forcing_ds5_psrf`
-- `A_forcing_ds6_fsds`
-- `A_forcing_ds7_qbot`
-- `A_forcing_ds8_prectmms`
-- `A_forcing_ds9_tbot`
-- `A_clm_params_pft` (required)
+## Scripts
+
+- `scripts/run_extraction.py`: extraction only (build artifacts/manifests)
+- `scripts/run_assembly.py`: assembly only (build final dataset from artifacts)
+- `scripts/run_pipeline.py`: legacy combined entrypoint (still supported)
+
+## Forcing extraction mode
+
+- `FORCING_MODE: legacy`
+  - current behavior: read consolidated forcing NetCDF files (`ds4`~`ds9`)
+- `FORCING_MODE: datm`
+  - DATM/new uELM forcing mode
+  - supports direct per-variable path (`DATM_*_PATH`) or monthly scan from `DATM_ROOT` + token map
 
 ## Commands
 
-### 1) Full build + assemble
+### 1) Full extraction + assembly (recommended)
+
+**Legacy mode** (`FORCING_MODE: legacy`):
 
 ```bash
-python3 /home/UNT/dg0997/all_gdw/0_oak_weather/16_add_4_surf_input_output/5_final_dataset_construction/run_pipeline.py --build all --assemble
+python3 scripts/run_extraction.py --build all
+python3 scripts/run_assembly.py
 ```
+Or use the one-step approach:
+```bash
+python3 scripts/run_pipeline.py --build all --assemble
 
-### 2) Rebuild one module only (example: QBOT)
+**DATM mode** (`FORCING_MODE: datm`):
 
 ```bash
-python3 /home/UNT/dg0997/all_gdw/0_oak_weather/16_add_4_surf_input_output/5_final_dataset_construction/run_pipeline.py --build A_forcing_ds7_qbot
+python3 scripts/run_extraction.py --build all --forcing-mode datm
+python3 scripts/run_assembly.py
+```
+Or use the one-step approach:
+```bash
+python3 scripts/run_pipeline.py --build all --assemble --forcing-mode datm
 ```
 
-### 3) Assemble only (reuse existing artifacts)
+
+### 2) Rebuild one module only (example: QBOT forcing)
+
+**Legacy mode** (`FORCING_MODE: legacy`):
 
 ```bash
-python3 /home/UNT/dg0997/all_gdw/0_oak_weather/16_add_4_surf_input_output/5_final_dataset_construction/run_pipeline.py --assemble
+python3 scripts/run_extraction.py --build A_forcing_ds7_qbot
 ```
 
-### 4) Rebuild one module and assemble (recommended for updates)
+**DATM mode** (`FORCING_MODE: datm`):
 
 ```bash
-python3 /home/UNT/dg0997/all_gdw/0_oak_weather/16_add_4_surf_input_output/5_final_dataset_construction/run_pipeline.py --build A_forcing_ds7_qbot --assemble
+python3 scripts/run_extraction.py --build A_forcing_ds7_qbot --forcing-mode datm
+
+If only one input file changes (for example QBOT):
+1. Update path in `config/CNP_dataInput.txt` (for example `DS7_PATH` or DATM path).
+2. Rebuild only the affected module (e.g., `A_forcing_ds7_qbot`).
+   - Legacy mode: `python3 scripts/run_extraction.py --build A_forcing_ds7_qbot`
+   - DATM mode: `python3 scripts/run_extraction.py --build A_forcing_ds7_qbot --forcing-mode datm`
+3. Run assembly: `python3 scripts/run_assembly.py`
+
 ```
 
-## How to Change Input File Paths
+### 3) Build forcing intermediates (DS4~DS9) from DATM monthly files
 
-Edit `FILE_PATHS` in `config.py`.
+This step is **only needed for DATM mode** to preprocess monthly DATM files into consolidated NetCDF files. The intermediates are written to:
 
-Examples:
+- `BASE_OUTPUT_ROOT/forcing_netcdf_datm_<DATM_START_YEAR>_<DATM_END_YEAR>/`
 
-- replace QBOT source:
-  - `FILE_PATHS["ds7"] = "/abs/path/to/new_QBOT.nc"`
-- replace Y inputs:
-  - `FILE_PATHS["h0_list"] = ["/abs/path/to/new_h0.nc"]`
-  - `FILE_PATHS["r_list"] = ["/abs/path/to/new_r.nc"]`
-- replace PFT parameter file:
-  - `FILE_PATHS["clm_params"] = "/abs/path/to/new_clm_params.nc"`
+**Build intermediates**:
 
-After updating paths, rebuild the related module(s), then run assembly.
+```bash
+python3 scripts/run_extraction.py \
+  --forcing-mode datm \
+  --prepare-forcing-only
+```
 
-Notes:
+**Force rebuild** (if intermediates already exist):
 
-- `A_h0_list_y` now uses one h0 file directly (no averaging).
-- `A_r_list_y` now uses one r file directly (no averaging).
+```bash
+python3 scripts/run_extraction.py \
+  --forcing-mode datm \
+  --prepare-forcing-only \
+  --force-rebuild-forcing
+```
 
-## Typical Update Workflow
+**Note**: This step is usually done automatically when running extraction with `--forcing-mode datm`. Only run this separately if you want to preprocess forcing files before running the full extraction.
 
-If only one source file changes (for example `ds7` QBOT):
-
-1. Update `FILE_PATHS["ds7"]` in `config.py`.
-2. Rebuild only `A_forcing_ds7_qbot`.
-3. Run final assembly.
-
-This avoids full recomputation and keeps all unchanged modules reusable.
 

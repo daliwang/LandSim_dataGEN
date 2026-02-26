@@ -1,69 +1,38 @@
 import os
+from pathlib import Path
+
+from cnp_data_input_parse import parse_cnp_data_input
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+CONFIG_INPUT_FILE = PROJECT_ROOT / "config" / "CNP_dataInput.txt"
 
 # =========================
 # Base Paths
 # =========================
-BASE_OUTPUT_ROOT = "/mnt/DATA/0_oak_data/3_dataset_based_construction"
+# Note: BASE_OUTPUT_ROOT will be overridden by CNP_dataInput.txt
+BASE_OUTPUT_ROOT = str(PROJECT_ROOT / "output")
 PIPELINE_ROOT = os.path.join(BASE_OUTPUT_ROOT, "modular_by_input_v1")
 ARTIFACT_ROOT = os.path.join(PIPELINE_ROOT, "artifacts")
 FINAL_OUTPUT_DIR = os.path.join(BASE_OUTPUT_ROOT, "final_dataset")
 MANIFEST_ROOT = os.path.join(PIPELINE_ROOT, "manifests")
 
 # =========================
-# Input Files (aligned with 93_based_73_refactor.py)
+# Input Files
 # =========================
-FILE_PATHS = {
-    "ds1": "/mnt/DATA/0_oak_data/0_dataset_construction/surfdata_0.9x1.25_hist_1700_17pfts_c240731.nc",
-    "ds2": "/mnt/DATA/0_oak_data/0_dataset_construction/0_new_correct_20_restart/20251201_TRENDY2024_default_ICB1850CNRDCTCBC_ad_spinup.elm.h0.0021-01-01-00000.nc",
-    "ds4": "/home/UNT/dg0997/all_gdw/0_oak_weather/dataset/ornl_data/forcings/crujra.v2.5.5d_FLDS_1901-2023_z01.nc",
-    "ds5": "/home/UNT/dg0997/all_gdw/0_oak_weather/dataset/ornl_data/forcings/crujra.v2.5.5d_PSRF_1901-2023_z01.nc",
-    "ds6": "/home/UNT/dg0997/all_gdw/0_oak_weather/dataset/ornl_data/forcings/crujra.v2.5.5d_FSDS_1901-2023_z01.nc",
-    "ds7": "/home/UNT/dg0997/all_gdw/0_oak_weather/dataset/ornl_data/forcings/crujra.v2.5.5d_QBOT_1901-2023_z01.nc",
-    "ds8": "/home/UNT/dg0997/all_gdw/0_oak_weather/dataset/ornl_data/forcings/crujra.v2.5.5d_PRECTmms_1901-2023_z01.nc",
-    "ds9": "/home/UNT/dg0997/all_gdw/0_oak_weather/dataset/ornl_data/forcings/crujra.v2.5.5d_TBOT_1901-2023_z01.nc",
-    "ds10": "/mnt/DATA/0_oak_data/0_dataset_construction/0_new_correct_20_restart/20251201_TRENDY2024_default_ICB1850CNRDCTCBC_ad_spinup.elm.r.0021-01-01-00000.nc",
-    "h0_list": ["/mnt/DATA/0_oak_data/0_dataset_construction/20251201_TRENDY2024_default_ICB1850CNPRDCTCBC.elm.h0.0801-01-01-00000.nc"],
-    "r_list": ["/mnt/DATA/0_oak_data/0_dataset_construction/20251201_TRENDY2024_default_ICB1850CNPRDCTCBC.elm.r.0801-01-01-00000.nc"],
-    "clm_params": "/home/UNT/dg0997/all_gdw/0_oak_weather/16_add_4_surf_input_output/clm_params.nc",
-}
+# Note: All file paths are defined in CNP_dataInput.txt and will override these defaults
+FILE_PATHS = {}
 
 # =========================
 # Variable Definitions
 # =========================
-RESTART_PFT_VARS = [
-    "totvegc", "deadstemn", "deadcrootn", "deadstemp", "deadcrootp",
-    "leafc", "leafc_storage", "frootc", "frootc_storage",
-    "deadcrootc", "deadstemc", "tlai", "leafn", "leafn_storage", "frootn",
-    "frootn_storage", "leafp", "leafp_storage", "frootp", "frootp_storage",
-    "livestemc", "livestemc_storage", "livestemn", "livestemn_storage",
-    "livestemp", "livestemp_storage", "deadcrootc_storage", "deadstemc_storage",
-    "livecrootc", "livecrootc_storage", "deadcrootn_storage", "deadstemn_storage",
-    "livecrootn", "livecrootn_storage", "deadcrootp_storage", "deadstemp_storage",
-    "livecrootp", "livecrootp_storage",
-    "leafc_xfer", "frootc_xfer", "livestemc_xfer", "deadstemc_xfer",
-    "livecrootc_xfer", "deadcrootc_xfer", "gresp_xfer",
-    "leafn_xfer", "frootn_xfer", "livestemn_xfer", "deadstemn_xfer",
-    "livecrootn_xfer", "deadcrootn_xfer",
-    "leafp_xfer", "frootp_xfer", "livestemp_xfer", "deadstemp_xfer",
-    "livecrootp_xfer", "deadcrootp_xfer",
-    "cpool", "npool", "ppool", "xsmrpool",
-]
+# Note: These will be overridden by CNP_dataInput.txt if defined there
+RESTART_PFT_VARS = []
 RESTART_COL_1D_VARS = []
-RESTART_COL_2D_VARS = [
-    "cwdn_vr", "secondp_vr", "cwdp_vr", "soil3c_vr", "soil4c_vr", "cwdc_vr",
-    "soil1c_vr", "soil1n_vr", "soil1p_vr", "soil2c_vr", "soil2n_vr", "soil2p_vr",
-    "soil3n_vr", "soil3p_vr", "soil4n_vr", "soil4p_vr", "litr1c_vr", "litr2c_vr",
-    "litr3c_vr", "litr1n_vr", "litr2n_vr", "litr3n_vr", "litr1p_vr", "litr2p_vr",
-    "litr3p_vr", "sminn_vr", "smin_no3_vr", "smin_nh4_vr", "labilep_vr",
-    "occlp_vr", "primp_vr", "solutionp_vr",
-]
-
-STATIC_SURFACE_VARS_2D = [
-    "LANDFRAC_PFT", "PCT_NATVEG", "AREA", "SOIL_COLOR", "SOIL_ORDER",
-    "OCCLUDED_P", "SECONDARY_P", "LABILE_P", "APATITE_P",
-]
-STATIC_SURFACE_VARS_3D = ["PCT_SAND", "PCT_CLAY", "PCT_NAT_PFT"]
-HISTORY_GRID_VARS_2D = ["GPP", "HR", "AR", "NPP"]
+RESTART_COL_2D_VARS = []
+STATIC_SURFACE_VARS_2D = []
+STATIC_SURFACE_VARS_3D = []
+HISTORY_GRID_VARS_2D = []
 
 FORCING_MODULE_MAP = {
     "A_forcing_ds4_flds": ("ds4", "FLDS"),
@@ -74,18 +43,33 @@ FORCING_MODULE_MAP = {
     "A_forcing_ds9_tbot": ("ds9", "TBOT"),
 }
 
-PFT_TARGET_VARS = [
-    "deadwdcn", "frootcn", "leafcn", "lflitcn", "livewdcn", "c3psn", "croot_stem", "crop", "dleaf",
-    "dsladlai", "evergreen", "fcur", "flivewd", "flnr", "fr_fcel", "fr_flab", "fr_flig", "froot_leaf",
-    "grperc", "grpnow", "leaf_long", "lf_fcel", "lf_flab", "lf_flig", "rholnir", "rholvis", "rhosnir", "rhosvis",
-    "roota_par", "rootb_par", "rootprof_beta", "season_decid", "slatop", "smpsc", "smpso", "stem_leaf", "stress_decid",
-    "taulnir", "taulvis", "tausnir", "tausvis", "woody", "xl", "z0mr",
-]
+# Note: These will be overridden by CNP_dataInput.txt if defined there
+FORCING_MODE = "legacy"
+DATM_ROOT = ""
+DATM_START_YEAR = 1901
+DATM_END_YEAR = 2023
+# Initialize with empty values for all forcing variables
+DATM_TOKEN_MAP = {
+    "FLDS": "",
+    "PSRF": "",
+    "FSDS": "",
+    "QBOT": "",
+    "PRECTmms": "",
+    "TBOT": "",
+}
+DATM_FORCING_PATHS = {
+    "FLDS": "",
+    "PSRF": "",
+    "FSDS": "",
+    "QBOT": "",
+    "PRECTmms": "",
+    "TBOT": "",
+}
+PFT_TARGET_VARS = []
 
 LAT1, LON1 = 90, 0
 LAT2, LON2 = -90, 360
 BATCH_SIZE = 1000
-
 TIME_SERIES_LENGTH = 179580
 STEPS_PER_DAY = 4
 YEARS_IN_DATA = 123
@@ -106,4 +90,150 @@ ALL_MODULES = [
     "A_forcing_ds9_tbot",
     "A_clm_params_pft",
 ]
+
+
+def _to_int(raw: str, fallback: int) -> int:
+    try:
+        return int(raw)
+    except Exception:
+        return fallback
+
+
+def _parse_list(raw: str):
+    values = [part.strip() for part in raw.split(",")]
+    return [value for value in values if value]
+
+
+def _apply_cnp_data_input_overrides() -> None:
+    global BASE_OUTPUT_ROOT
+    global PIPELINE_ROOT
+    global ARTIFACT_ROOT
+    global FINAL_OUTPUT_DIR
+    global MANIFEST_ROOT
+    global LAT1
+    global LAT2
+    global LON1
+    global LON2
+    global BATCH_SIZE
+    global TIME_SERIES_LENGTH
+    global STEPS_PER_DAY
+    global YEARS_IN_DATA
+    global FORCING_MODE
+    global DATM_ROOT
+    global DATM_START_YEAR
+    global DATM_END_YEAR
+    global RESTART_PFT_VARS
+    global RESTART_COL_2D_VARS
+    global RESTART_COL_1D_VARS
+    global HISTORY_GRID_VARS_2D
+    global STATIC_SURFACE_VARS_2D
+    global STATIC_SURFACE_VARS_3D
+    global PFT_TARGET_VARS
+
+    parsed = parse_cnp_data_input(str(CONFIG_INPUT_FILE))
+    scalars = parsed.get("scalars", {})
+    sections = parsed.get("sections", {})
+
+    if scalars.get("BASE_OUTPUT_ROOT"):
+        BASE_OUTPUT_ROOT = scalars["BASE_OUTPUT_ROOT"]
+        PIPELINE_ROOT = os.path.join(BASE_OUTPUT_ROOT, "modular_by_input_v1")
+        ARTIFACT_ROOT = os.path.join(PIPELINE_ROOT, "artifacts")
+        FINAL_OUTPUT_DIR = os.path.join(BASE_OUTPUT_ROOT, "final_dataset")
+        MANIFEST_ROOT = os.path.join(PIPELINE_ROOT, "manifests")
+
+    path_key_map = {
+        "DS1_PATH": "ds1",
+        "DS2_PATH": "ds2",
+        "DS4_PATH": "ds4",
+        "DS5_PATH": "ds5",
+        "DS6_PATH": "ds6",
+        "DS7_PATH": "ds7",
+        "DS8_PATH": "ds8",
+        "DS9_PATH": "ds9",
+        "DS10_PATH": "ds10",
+        "CLM_PARAMS_PATH": "clm_params",
+    }
+    for scalar_key, file_key in path_key_map.items():
+        if scalars.get(scalar_key):
+            FILE_PATHS[file_key] = scalars[scalar_key]
+
+    if scalars.get("H0_LIST_PATHS"):
+        FILE_PATHS["h0_list"] = _parse_list(scalars["H0_LIST_PATHS"])
+    if scalars.get("R_LIST_PATHS"):
+        FILE_PATHS["r_list"] = _parse_list(scalars["R_LIST_PATHS"])
+
+    LAT1 = _to_int(scalars.get("LAT1", str(LAT1)), LAT1)
+    LAT2 = _to_int(scalars.get("LAT2", str(LAT2)), LAT2)
+    LON1 = _to_int(scalars.get("LON1", str(LON1)), LON1)
+    LON2 = _to_int(scalars.get("LON2", str(LON2)), LON2)
+    BATCH_SIZE = _to_int(scalars.get("BATCH_SIZE", str(BATCH_SIZE)), BATCH_SIZE)
+    TIME_SERIES_LENGTH = _to_int(scalars.get("TIME_SERIES_LENGTH", str(TIME_SERIES_LENGTH)), TIME_SERIES_LENGTH)
+    STEPS_PER_DAY = _to_int(scalars.get("STEPS_PER_DAY", str(STEPS_PER_DAY)), STEPS_PER_DAY)
+    YEARS_IN_DATA = _to_int(scalars.get("YEARS_IN_DATA", str(YEARS_IN_DATA)), YEARS_IN_DATA)
+
+    FORCING_MODE = (scalars.get("FORCING_MODE", FORCING_MODE) or FORCING_MODE).strip().lower()
+    DATM_ROOT = scalars.get("DATM_ROOT", DATM_ROOT)
+    DATM_START_YEAR = _to_int(scalars.get("DATM_START_YEAR", str(DATM_START_YEAR)), DATM_START_YEAR)
+    DATM_END_YEAR = _to_int(scalars.get("DATM_END_YEAR", str(DATM_END_YEAR)), DATM_END_YEAR)
+
+    token_overrides = {
+        "DATM_FLDS_TOKEN": "FLDS",
+        "DATM_PSRF_TOKEN": "PSRF",
+        "DATM_FSDS_TOKEN": "FSDS",
+        "DATM_QBOT_TOKEN": "QBOT",
+        "DATM_PRECTMMS_TOKEN": "PRECTmms",
+        "DATM_TBOT_TOKEN": "TBOT",
+    }
+    for scalar_key, var_name in token_overrides.items():
+        if scalars.get(scalar_key):
+            DATM_TOKEN_MAP[var_name] = scalars[scalar_key]
+
+    path_overrides = {
+        "DATM_FLDS_PATH": "FLDS",
+        "DATM_PSRF_PATH": "PSRF",
+        "DATM_FSDS_PATH": "FSDS",
+        "DATM_QBOT_PATH": "QBOT",
+        "DATM_PRECTMMS_PATH": "PRECTmms",
+        "DATM_TBOT_PATH": "TBOT",
+    }
+    for scalar_key, var_name in path_overrides.items():
+        if scalars.get(scalar_key):
+            DATM_FORCING_PATHS[var_name] = scalars[scalar_key]
+
+    if sections.get("time_series_variables"):
+        time_vars = sections["time_series_variables"]
+        module_keys = list(FORCING_MODULE_MAP.keys())
+        if len(time_vars) == len(module_keys):
+            FORCING_MODULE_MAP[module_keys[0]] = ("ds4", time_vars[0])
+            FORCING_MODULE_MAP[module_keys[1]] = ("ds5", time_vars[1])
+            FORCING_MODULE_MAP[module_keys[2]] = ("ds6", time_vars[2])
+            FORCING_MODULE_MAP[module_keys[3]] = ("ds7", time_vars[3])
+            FORCING_MODULE_MAP[module_keys[4]] = ("ds8", time_vars[4])
+            FORCING_MODULE_MAP[module_keys[5]] = ("ds9", time_vars[5])
+
+    if sections.get("surface_properties"):
+        static_surface = sections["surface_properties"]
+        STATIC_SURFACE_VARS_2D = [name for name in static_surface if name not in {"PCT_SAND", "PCT_CLAY", "PCT_NAT_PFT"}]
+        STATIC_SURFACE_VARS_3D = [name for name in static_surface if name in {"PCT_SAND", "PCT_CLAY", "PCT_NAT_PFT"}]
+
+    if sections.get("scalar_variables"):
+        HISTORY_GRID_VARS_2D = sections["scalar_variables"]
+
+    if sections.get("pft_1d_variables"):
+        RESTART_PFT_VARS = sections["pft_1d_variables"]
+
+    if sections.get("variables_2d_soil"):
+        RESTART_COL_2D_VARS = sections["variables_2d_soil"]
+
+    if sections.get("restart_col_1d_vars"):
+        RESTART_COL_1D_VARS = sections["restart_col_1d_vars"]
+
+    if sections.get("pft_parameters"):
+        normalized = []
+        for name in sections["pft_parameters"]:
+            normalized.append(name[4:] if name.startswith("pft_") else name)
+        PFT_TARGET_VARS = normalized
+
+
+_apply_cnp_data_input_overrides()
 
