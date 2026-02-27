@@ -779,8 +779,11 @@ def run_extraction(to_build: List[str]) -> None:
     modules = to_build
     if "all" in modules:
         modules = config.ALL_MODULES.copy()
-    if config.FORCING_MODE == "datm":
+    
+    forcing_modules = [m for m in modules if m.startswith("A_forcing_")]
+    if forcing_modules and config.FORCING_MODE == "datm":
         prepare_forcing_inputs_from_datm(force_rebuild=False)
+    
     if modules:
         if "A_index_core" not in modules:
             if not os.path.exists(os.path.join(module_dir("A_index_core"), "index_master.pkl")):
