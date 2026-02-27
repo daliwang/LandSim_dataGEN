@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import datetime
+import gc
 import json
 import os
 import re
@@ -684,16 +685,45 @@ def assemble_final_dataset() -> None:
     ] + forcing_modules
 
     for batch_id in batch_ids:
+        print(f"[Assembler] Processing batch {batch_id}...")
         merged = read_module_batch("A_index_core", batch_id)[["__row_id", "Latitude", "Longitude"]].copy()
+        print(f"[Assembler] Loaded A_index_core for batch {batch_id}")
 
-        for module in mandatory_modules:
+        # 先处理非时间序列模块
+        non_forcing_modules = [m for m in mandatory_modules if not m.startswith("A_forcing_")]
+        for module in non_forcing_modules:
+            print(f"[Assembler] Loading {module} for batch {batch_id}...")
             df_mod = read_module_batch(module, batch_id)
             merged = merged.merge(df_mod, on="__row_id", how="left")
+            del df_mod  # 释放内存
+            gc.collect()  # 强制垃圾回收
+            print(f"[Assembler] Merged {module} for batch {batch_id}")
 
+        # 处理时间序列模块，立即转换为月度平均值以节省内存
+        print(f"[Assembler] Processing forcing modules (with immediate monthly conversion) for batch {batch_id}...")
         time_series_columns = ["FLDS", "PSRF", "FSDS", "QBOT", "PRECTmms", "TBOT"]
-        for col in time_series_columns:
-            if col in merged.columns:
-                merged[col] = merged[col].apply(calculate_monthly_avg)
+        forcing_modules_sorted = [m for m in mandatory_modules if m.startswith("A_forcing_")]
+        
+        for module in forcing_modules_sorted:
+            print(f"[Assembler] Loading and converting {module} for batch {batch_id}...")
+            df_mod = read_module_batch(module, batch_id)
+            # 找到对应的时间序列列名
+            var_name = None
+            for ts_col in time_series_columns:
+                if ts_col in df_mod.columns:
+                    var_name = ts_col
+                    break
+            
+            if var_name:
+                # 立即转换为月度平均值，减少内存占用
+                df_mod[var_name] = df_mod[var_name].apply(calculate_monthly_avg)
+            
+            merged = merged.merge(df_mod, on="__row_id", how="left")
+            del df_mod  # 释放内存
+            gc.collect()  # 强制垃圾回收
+            print(f"[Assembler] Merged {module} for batch {batch_id}")
+        
+        print(f"[Assembler] Completed all merges for batch {batch_id}")
 
         single_value_columns = [
             "landfrac", "LANDFRAC_PFT", "PCT_NATVEG", "AREA", "SOIL_COLOR", "SOIL_ORDER",
