@@ -246,9 +246,9 @@ def _resolve_datm_files(var_name: str) -> List[str]:
     if not token:
         raise ValueError(f"No DATM token configured for forcing variable: {var_name}")
 
-    pattern = re.compile(rf"(?:.*_)?clmforc\..*\.{re.escape(token)}\.(\d{{4}})-(\d{{2}})\.nc$")
+    pattern = re.compile(rf"(?:.*_)?cl[i]?mforc\..*\.{re.escape(token)}\.(\d{{4}})-(\d{{2}})\.nc$")
     files_by_month: Dict[tuple, List[str]] = {}
-    for root, _, names in os.walk(datm_root):
+    for root, _, names in os.walk(datm_root, followlinks=True):
         for name in names:
             match = pattern.match(name)
             if not match:
@@ -341,11 +341,16 @@ def _monthly_mean_series_from_datm_files(var_name: str, datm_files: List[str]):
     return series, lat_flat, lon_flat
 
 
-def prepare_forcing_inputs_from_datm(force_rebuild: bool = False) -> None:
+def prepare_forcing_inputs_from_datm(force_rebuild: bool = False, required_vars: List[str] = None) -> None:
     """
     Build consolidated forcing NetCDF files (DS4~DS9) from DATM monthly files.
     This mirrors the Zhuowei workflow so downstream modules can reuse stable
     intermediate forcing artifacts.
+    
+    Args:
+        force_rebuild: If True, rebuild even if files exist
+        required_vars: List of variable names to process (e.g., ["FLDS", "QBOT"]).
+                       If None, process all variables.
     """
     if config.FORCING_MODE != "datm":
         return
@@ -360,6 +365,11 @@ def prepare_forcing_inputs_from_datm(force_rebuild: bool = False) -> None:
         "PRECTmms": "ds8",
         "TBOT": "ds9",
     }
+    
+    # Filter to only required variables if specified
+    if required_vars is not None:
+        var_to_ds_key = {var: key for var, key in var_to_ds_key.items() if var in required_vars}
+    
     out_dir = _preprocessed_forcing_output_dir()
     os.makedirs(out_dir, exist_ok=True)
 
@@ -470,7 +480,7 @@ def build_forcing_module(module_name: str, ds_key: str, var_name: str) -> None:
             # Usually run_extraction() has already prepared these files once.
             # Keep this fallback to support direct module invocation.
             print(f"[ForcingPrep] missing preprocessed file for {var_name}, preparing now...")
-            prepare_forcing_inputs_from_datm(force_rebuild=False)
+            prepare_forcing_inputs_from_datm(force_rebuild=False, required_vars=[var_name])
             ds_path = config.FILE_PATHS[ds_key]
         print(f"[{module_name}] using DATM preprocessed forcing: {ds_path}")
         ds = nc.Dataset(ds_path)
@@ -489,7 +499,9 @@ def build_forcing_module(module_name: str, ds_key: str, var_name: str) -> None:
                 # Fallback: assume non-time axis is the grid axis.
                 grid_axis = 1 if dims and dims[0] == "time" else 0
 
+            batch_ids = sorted(index_df["batch_id"].unique())
             for batch_id, batch_df in index_df.groupby("batch_id", sort=True):
+                print(f"[{module_name}] Processing batch {batch_id}/{batch_ids[-1]}...")
                 rows = {"__row_id": batch_df["__row_id"].tolist(), var_name: []}
                 for idx in batch_df["nearest_forcing_index"]:
                     idx = int(idx)
@@ -499,6 +511,7 @@ def build_forcing_module(module_name: str, ds_key: str, var_name: str) -> None:
                         series = np.asarray(arr[idx, :], dtype=float).tolist()
                     rows[var_name].append(series)
                 pd.DataFrame(rows).to_pickle(os.path.join(out_dir, f"batch_{int(batch_id):02d}.pkl"))
+                print(f"[{module_name}] Saved batch {batch_id}")
         finally:
             ds.close()
     else:
@@ -506,7 +519,9 @@ def build_forcing_module(module_name: str, ds_key: str, var_name: str) -> None:
         ds = nc.Dataset(ds_path)
         sources = [source_meta(ds_path), {"mode": "legacy"}]
         try:
+            batch_ids = sorted(index_df["batch_id"].unique())
             for batch_id, batch_df in index_df.groupby("batch_id", sort=True):
+                print(f"[{module_name}] Processing batch {batch_id}/{batch_ids[-1]}...")
                 rows = {
                     "__row_id": batch_df["__row_id"].tolist(),
                     var_name: [
@@ -515,6 +530,7 @@ def build_forcing_module(module_name: str, ds_key: str, var_name: str) -> None:
                     ],
                 }
                 pd.DataFrame(rows).to_pickle(os.path.join(out_dir, f"batch_{int(batch_id):02d}.pkl"))
+                print(f"[{module_name}] Saved batch {batch_id}")
         finally:
             ds.close()
 
@@ -670,6 +686,20 @@ def read_module_batch(module_name: str, batch_id: int) -> pd.DataFrame:
     return pd.read_pickle(path)
 
 
+def module_batch_exists(module_name: str, batch_id: int) -> bool:
+    """Check if a module batch file exists."""
+    path = os.path.join(module_dir(module_name), f"batch_{batch_id:02d}.pkl")
+    return os.path.exists(path)
+
+
+def read_module_batch_optional(module_name: str, batch_id: int) -> pd.DataFrame:
+    """Read module batch file if it exists, return None otherwise."""
+    path = os.path.join(module_dir(module_name), f"batch_{batch_id:02d}.pkl")
+    if not os.path.exists(path):
+        return None
+    return pd.read_pickle(path)
+
+
 def assemble_final_dataset() -> None:
     print("[Assembler] assembling final dataset...")
     index_df = load_index_master()
@@ -684,30 +714,44 @@ def assemble_final_dataset() -> None:
         "A_clm_params_pft",
     ] + forcing_modules
 
+    # Track missing modules
+    missing_modules_summary = {batch_id: [] for batch_id in batch_ids}
+    
     for batch_id in batch_ids:
         print(f"[Assembler] Processing batch {batch_id}...")
+        # A_index_core is required, raise error if missing
+        if not module_batch_exists("A_index_core", batch_id):
+            raise FileNotFoundError(f"Missing required module A_index_core for batch {batch_id}")
         merged = read_module_batch("A_index_core", batch_id)[["__row_id", "Latitude", "Longitude"]].copy()
         print(f"[Assembler] Loaded A_index_core for batch {batch_id}")
 
-        # 先处理非时间序列模块
+        # Process non-time-series modules first
         non_forcing_modules = [m for m in mandatory_modules if not m.startswith("A_forcing_")]
         for module in non_forcing_modules:
+            if not module_batch_exists(module, batch_id):
+                print(f"[Assembler] WARNING: Skipping missing module {module} for batch {batch_id}")
+                missing_modules_summary[batch_id].append(module)
+                continue
             print(f"[Assembler] Loading {module} for batch {batch_id}...")
             df_mod = read_module_batch(module, batch_id)
             merged = merged.merge(df_mod, on="__row_id", how="left")
-            del df_mod  # 释放内存
-            gc.collect()  # 强制垃圾回收
+            del df_mod  # Free memory
+            gc.collect()  # Force garbage collection
             print(f"[Assembler] Merged {module} for batch {batch_id}")
 
-        # 处理时间序列模块，立即转换为月度平均值以节省内存
+        # Process time-series modules, convert to monthly averages immediately to save memory
         print(f"[Assembler] Processing forcing modules (with immediate monthly conversion) for batch {batch_id}...")
         time_series_columns = ["FLDS", "PSRF", "FSDS", "QBOT", "PRECTmms", "TBOT"]
         forcing_modules_sorted = [m for m in mandatory_modules if m.startswith("A_forcing_")]
         
         for module in forcing_modules_sorted:
+            if not module_batch_exists(module, batch_id):
+                print(f"[Assembler] WARNING: Skipping missing module {module} for batch {batch_id}")
+                missing_modules_summary[batch_id].append(module)
+                continue
             print(f"[Assembler] Loading and converting {module} for batch {batch_id}...")
             df_mod = read_module_batch(module, batch_id)
-            # 找到对应的时间序列列名
+            # Find corresponding time-series column name
             var_name = None
             for ts_col in time_series_columns:
                 if ts_col in df_mod.columns:
@@ -715,12 +759,12 @@ def assemble_final_dataset() -> None:
                     break
             
             if var_name:
-                # 立即转换为月度平均值，减少内存占用
+                # Convert to monthly averages immediately to reduce memory usage
                 df_mod[var_name] = df_mod[var_name].apply(calculate_monthly_avg)
             
             merged = merged.merge(df_mod, on="__row_id", how="left")
-            del df_mod  # 释放内存
-            gc.collect()  # 强制垃圾回收
+            del df_mod  # Free memory
+            gc.collect()  # Force garbage collection
             print(f"[Assembler] Merged {module} for batch {batch_id}")
         
         print(f"[Assembler] Completed all merges for batch {batch_id}")
@@ -750,6 +794,15 @@ def assemble_final_dataset() -> None:
         merged.to_pickle(out_path)
         print(f"[Assembler] saved: {out_path}")
 
+    # Print summary of missing modules
+    all_missing = {bid: mods for bid, mods in missing_modules_summary.items() if mods}
+    if all_missing:
+        print("\n[Assembler] WARNING: Some modules were missing during assembly:")
+        for batch_id, modules in all_missing.items():
+            print(f"  Batch {batch_id}: {', '.join(modules)}")
+    else:
+        print("\n[Assembler] All modules were successfully assembled.")
+    
     print("[Assembler] done.")
 
 
@@ -782,7 +835,13 @@ def run_extraction(to_build: List[str]) -> None:
     
     forcing_modules = [m for m in modules if m.startswith("A_forcing_")]
     if forcing_modules and config.FORCING_MODE == "datm":
-        prepare_forcing_inputs_from_datm(force_rebuild=False)
+        # Determine which variables are needed based on modules to build
+        required_vars = []
+        for module_name in forcing_modules:
+            if module_name in config.FORCING_MODULE_MAP:
+                _, var_name = config.FORCING_MODULE_MAP[module_name]
+                required_vars.append(var_name)
+        prepare_forcing_inputs_from_datm(force_rebuild=False, required_vars=required_vars if required_vars else None)
     
     if modules:
         if "A_index_core" not in modules:
