@@ -15,6 +15,12 @@ import config
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run extraction only (no assembly)")
     parser.add_argument(
+        "--config-input",
+        type=str,
+        default=None,
+        help="Path to CNP_dataInput-style config file (default: config/CNP_dataInput.txt)",
+    )
+    parser.add_argument(
         "--build",
         nargs="+",
         default=["all"],
@@ -46,6 +52,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.config_input:
+        config.load_config(args.config_input)
     run_pipeline.ensure_dirs()
     if args.forcing_mode:
         config.FORCING_MODE = args.forcing_mode

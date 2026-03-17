@@ -6,6 +6,7 @@ from cnp_data_input_parse import parse_cnp_data_input
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_INPUT_FILE = PROJECT_ROOT / "config" / "CNP_dataInput.txt"
+ACTIVE_CONFIG_INPUT_FILE = str(CONFIG_INPUT_FILE)
 
 # =========================
 # Base Paths
@@ -104,7 +105,7 @@ def _parse_list(raw: str):
     return [value for value in values if value]
 
 
-def _apply_cnp_data_input_overrides() -> None:
+def _apply_cnp_data_input_overrides(config_path: str) -> None:
     global BASE_OUTPUT_ROOT
     global PIPELINE_ROOT
     global ARTIFACT_ROOT
@@ -129,8 +130,10 @@ def _apply_cnp_data_input_overrides() -> None:
     global STATIC_SURFACE_VARS_2D
     global STATIC_SURFACE_VARS_3D
     global PFT_TARGET_VARS
+    global ACTIVE_CONFIG_INPUT_FILE
 
-    parsed = parse_cnp_data_input(str(CONFIG_INPUT_FILE))
+    ACTIVE_CONFIG_INPUT_FILE = config_path
+    parsed = parse_cnp_data_input(config_path)
     scalars = parsed.get("scalars", {})
     sections = parsed.get("sections", {})
 
@@ -235,5 +238,16 @@ def _apply_cnp_data_input_overrides() -> None:
         PFT_TARGET_VARS = normalized
 
 
-_apply_cnp_data_input_overrides()
+def load_config(config_input_file: str | None = None) -> None:
+    """
+    Load or reload configuration from a CNP_dataInput-style text file.
+
+    If config_input_file is None, use the default CONFIG_INPUT_FILE path.
+    """
+    config_path = config_input_file if config_input_file is not None else str(CONFIG_INPUT_FILE)
+    _apply_cnp_data_input_overrides(config_path)
+
+
+# Load configuration once at import time using the default config file.
+load_config()
 

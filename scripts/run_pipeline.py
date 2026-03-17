@@ -858,6 +858,12 @@ def run_assembly() -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Modular dataset construction by input file")
     parser.add_argument(
+        "--config-input",
+        type=str,
+        default=None,
+        help="Path to CNP_dataInput-style config file (default: config/CNP_dataInput.txt)",
+    )
+    parser.add_argument(
         "--build",
         nargs="+",
         default=[],
@@ -894,6 +900,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.config_input:
+        config.load_config(args.config_input)
     ensure_dirs()
 
     if args.forcing_mode:
