@@ -1,0 +1,90 @@
+Tue Mar 17 15:44:09 2026    /global/cfs/cdirs/m4814/daweigao/15_code_Landsim/LandSim_dataGEN/output/profiles/surface_cprofile_20260317_153056.prof
+
+         524474514 function calls (524468862 primitive calls) in 777.894 seconds
+
+   Ordered by: cumulative time
+   List reduced from 441 to 80 due to restriction <80>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1    0.000    0.000  777.895  777.895 run_pipeline.py:942(run_extraction)
+        1    0.028    0.028  777.854  777.854 run_pipeline.py:920(build_module)
+        1    0.507    0.507  777.826  777.826 run_pipeline.py:216(build_ds1_surface)
+     3564  259.110    0.073  496.580    0.139 run_pipeline.py:226(<listcomp>)
+     1188  178.560    0.150  273.987    0.231 run_pipeline.py:228(<listcomp>)
+  4749408  103.188    0.000  177.123    0.000 utils.py:81(_StartCountStride)
+  4749408   19.048    0.000   88.437    0.000 core.py:2879(__new__)
+  4749408    3.337    0.000   49.643    0.000 {method 'view' of 'numpy.ndarray' objects}
+  4749408   11.715    0.000   46.306    0.000 core.py:3050(__array_finalize__)
+ 67679064   26.471    0.000   40.229    0.000 _function_base_impl.py:339(iterable)
+ 13060879   25.315    0.000   25.315    0.000 {method 'reduce' of 'numpy.ufunc' objects}
+  4749408   17.289    0.000   24.968    0.000 core.py:3024(_update_from)
+  9498819    5.365    0.000   24.760    0.000 _methods.py:58(_any)
+  4749408   16.532    0.000   19.868    0.000 utils.py:451(_out_array_shape)
+ 67679064   13.758    0.000   13.758    0.000 {built-in method builtins.iter}
+ 33252992   12.741    0.000   12.741    0.000 {built-in method numpy.asarray}
+  4749408    1.624    0.000   10.440    0.000 core.py:1374(make_mask_descr)
+  4749408    4.650    0.000    8.817    0.000 core.py:1360(_replace_dtype_fields)
+ 19011495    8.725    0.000    8.725    0.000 {built-in method numpy.empty}
+  3562056    1.499    0.000    7.420    0.000 _methods.py:67(_all)
+  8311464    7.033    0.000    7.033    0.000 {method 'view' of 'numpy.generic' objects}
+      396    0.001    0.000    5.519    0.014 _decorators.py:325(wrapper)
+      396    0.003    0.000    5.518    0.014 generic.py:3122(to_pickle)
+      396    0.004    0.000    5.515    0.014 pickle.py:33(to_pickle)
+ 57038476    4.814    0.000    4.814    0.000 {built-in method builtins.getattr}
+ 10686401    4.528    0.000    4.528    0.000 utils.py:32(_find_dim)
+ 47516654    4.485    0.000    4.485    0.000 {method 'append' of 'list' objects}
+  4749408    4.167    0.000    4.167    0.000 core.py:1328(_replace_dtype_fields_recursive)
+ 28695452    4.079    0.000    4.104    0.000 {built-in method builtins.isinstance}
+  4749409    2.187    0.000    3.903    0.000 {built-in method builtins.sum}
+ 23747436    3.782    0.000    3.782    0.000 {method 'update' of 'dict' objects}
+  3562056    2.737    0.000    3.732    0.000 core.py:4552(__float__)
+  9498816    3.700    0.000    3.700    0.000 core.py:3493(dtype)
+  3562056    1.385    0.000    3.597    0.000 core.py:3593(mask)
+  4750596    3.541    0.000    3.541    0.000 {built-in method numpy.array}
+      397    0.008    0.000    2.934    0.007 common.py:664(get_handle)
+      398    2.860    0.007    2.860    0.007 {built-in method io.open}
+ 10686168    2.352    0.000    2.352    0.000 {method 'ravel' of 'numpy.ndarray' objects}
+20232542/20226988    2.228    0.000    2.230    0.000 {built-in method builtins.len}
+      397    0.000    0.000    2.078    0.005 common.py:151(__exit__)
+      397    0.001    0.000    2.078    0.005 common.py:131(close)
+      396    2.077    0.005    2.077    0.005 {method 'close' of '_io.BufferedWriter' objects}
+  4749408    1.859    0.000    1.859    0.000 core.py:3509(shape)
+  4749408    1.298    0.000    1.830    0.000 core.py:1408(getmask)
+  4749408    1.717    0.000    1.717    0.000 utils.py:206(<genexpr>)
+  4749408    1.537    0.000    1.537    0.000 {built-in method builtins.max}
+  4749408    1.487    0.000    1.487    0.000 {method 'count' of 'list' objects}
+  3562056    0.995    0.000    0.995    0.000 {method 'item' of 'numpy.ndarray' objects}
+      396    0.006    0.000    0.847    0.002 frame.py:698(__init__)
+      396    0.006    0.000    0.831    0.002 construction.py:423(dict_to_mgr)
+      396    0.002    0.000    0.750    0.002 construction.py:96(arrays_to_mgr)
+      396    0.014    0.000    0.680    0.002 construction.py:596(_homogenize)
+     5546    0.046    0.000    0.679    0.000 construction.py:517(sanitize_array)
+  1187748    0.618    0.000    0.618    0.000 {method 'tolist' of 'numpy.ndarray' objects}
+  4756544    0.612    0.000    0.612    0.000 {built-in method builtins.hasattr}
+     5544    0.169    0.000    0.586    0.000 cast.py:123(maybe_convert_platform)
+  1187352    0.579    0.000    0.579    0.000 {method 'indices' of 'slice' objects}
+      396    0.489    0.001    0.499    0.001 {built-in method _pickle.dump}
+     5544    0.388    0.000    0.398    0.000 cast.py:1591(construct_1d_object_array_from_listlike)
+     9902    0.052    0.000    0.171    0.000 frame.py:4073(__getitem__)
+        1    0.000    0.000    0.086    0.086 run_pipeline.py:69(load_index_master)
+        1    0.000    0.000    0.085    0.085 pickle.py:114(read_pickle)
+        1    0.084    0.084    0.085    0.085 {built-in method _pickle.load}
+     9902    0.016    0.000    0.072    0.000 frame.py:4637(_get_item_cache)
+      399    0.062    0.000    0.065    0.000 {built-in method posix.stat}
+      398    0.010    0.000    0.052    0.000 base.py:475(__new__)
+      396    0.003    0.000    0.051    0.000 managers.py:2140(create_block_manager_from_column_arrays)
+      396    0.002    0.000    0.050    0.000 common.py:605(check_parent_directory)
+     9505    0.022    0.000    0.043    0.000 base.py:840(__iter__)
+     1189    0.004    0.000    0.043    0.000 frame.py:3994(_ixs)
+      397    0.001    0.000    0.042    0.000 ops.py:616(get_iterator)
+      396    0.012    0.000    0.041    0.000 managers.py:2209(_form_blocks)
+        2    0.000    0.000    0.041    0.021 genericpath.py:16(exists)
+      397    0.002    0.000    0.037    0.000 ops.py:1158(__iter__)
+      397    0.005    0.000    0.035    0.000 common.py:304(_get_filepath_or_buffer)
+      396    0.001    0.000    0.026    0.000 pathlib.py:1300(is_dir)
+      396    0.000    0.000    0.024    0.000 pathlib.py:1092(stat)
+        1    0.000    0.000    0.023    0.023 run_pipeline.py:59(save_manifest)
+    28910    0.012    0.000    0.021    0.000 series.py:834(_values)
+     7128    0.014    0.000    0.021    0.000 numeric.py:290(full)
+
+
