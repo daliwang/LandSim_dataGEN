@@ -1,0 +1,110 @@
+# =============================================================================
+# LandSim_dataGEN unified configuration
+# =============================================================================
+
+
+BASE_OUTPUT_ROOT: output
+
+# Input files
+DATA_ROOT: /gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TES_NORTH_dataset/ERA5_TESNORTH_inference
+
+EXPID: NORTHERA5_ERA5REF
+
+# NOTE:
+# The parser in this repo requires the exact keys below (DS1_PATH, DS2_PATH, ...).
+# For readability, we keep those required keys, and also provide "alias" names.
+
+# surfdata_path
+DS1_PATH: ${DATA_ROOT}/domain_surfdata/surfdata.TESSFA_DOMAIN1.4km.1d.NALCMS.c260218_yw.nc
+
+# init_h0_file
+DS2_PATH: ${DATA_ROOT}/history_restart_files/uELM_${EXPID}_I1850uELMCNPRDCTCBC.elm.h0.0021-01-01-00000.nc
+
+# init_r_path
+DS10_PATH: ${DATA_ROOT}/history_restart_files/uELM_${EXPID}_I1850uELMCNPRDCTCBC.elm.r.0021-01-01-00000.nc
+
+# target_ho_path
+#H0_LIST_PATHS: ${DATA_ROOT}/history_restart_files/uELM_${EXPID}_I1850CNPRDCTCBC_finalspin.elm.h0.1101-01-01-00000.nc
+
+# target_r_path
+#R_LIST_PATHS: ${DATA_ROOT}/history_restart_files/uELM_{EXPID}_I1850CNPRDCTCBC_finalspin.elm.r.1101-01-01-00000.nc
+
+# clm_params_path
+CLM_PARAMS_PATH: ${DATA_ROOT}/history_restart_files/clm_params_c211124.nc
+
+# DS4_PATH: output/forcing_netcdf_datm_1980_1999/FLDS_1980-1999.nc
+
+# Forcing extraction mode
+#   legacy: read consolidated forcing files (current logic)
+#   datm  : read DATM-format monthly forcing files (new uELM forcing input)
+FORCING_MODE: datm
+# DATM forcing parameters (only used when FORCING_MODE=datm)
+# When FORCING_MODE=legacy: These parameters are IGNORED. Use DS4_PATH~DS9_PATH instead.
+# When FORCING_MODE=datm: These parameters are REQUIRED to locate DATM monthly files.
+DATM_ROOT: ${DATA_ROOT}/forcing
+DATM_START_YEAR: 1980
+DATM_END_YEAR: 1999
+
+# DATM_*_TOKEN: Token string used to match DATM monthly file names
+#   - Used when DATM_*_PATH is empty (default behavior)
+#   - Files are searched in DATM_ROOT with pattern: clmforc.*.{TOKEN}.YYYY-MM.nc
+#   - Example: DATM_FLDS_TOKEN=TPQWL matches files like "clmforc.*.TPQWL.2004-01.nc"
+DATM_FLDS_TOKEN: TPQWL
+DATM_PSRF_TOKEN: TPQWL
+DATM_FSDS_TOKEN: Solr
+DATM_QBOT_TOKEN: TPQWL
+DATM_PRECTMMS_TOKEN: Prec
+DATM_TBOT_TOKEN: TPQWL
+
+# Domain and batching
+LAT1: 60
+LAT2: 42
+LON1: -119
+LON2: -65
+BATCH_SIZE: 2000
+
+# Time-series shape (for monthly conversion)
+TIME_SERIES_LENGTH: 58400
+STEPS_PER_DAY: 8
+YEARS_IN_DATA: 20
+
+TIME SERIES VARIABLES (Climate Forcing):
+• FLDS, PSRF, FSDS, QBOT, PRECTmms, TBOT
+
+SURFACE PROPERTIES:
+• LANDFRAC_PFT, PCT_NATVEG, AREA, SOIL_COLOR, SOIL_ORDER, OCCLUDED_P, SECONDARY_P, LABILE_P, APATITE_P
+• PCT_SAND, PCT_CLAY, PCT_NAT_PFT
+
+PFT PARAMETERS:
+• deadwdcn, frootcn, leafcn, lflitcn, livewdcn, c3psn, croot_stem, crop, dleaf
+• dsladlai, evergreen, fcur, flivewd, flnr, fr_fcel, fr_flab, fr_flig, froot_leaf
+• grperc, grpnow, leaf_long, lf_fcel, lf_flab, lf_flig, rholnir, rholvis, rhosnir, rhosvis
+• roota_par, rootb_par, rootprof_beta, season_decid, slatop, smpsc, smpso, stem_leaf, stress_decid
+• taulnir, taulvis, tausnir, tausvis, woody, xl, z0mr
+
+SCALAR VARIABLES:
+• GPP, HR, AR, NPP
+
+1D PFT VARIABLES:
+• totvegc, deadstemn, deadcrootn, deadstemp, deadcrootp
+• leafc, leafc_storage, frootc, frootc_storage
+• deadcrootc, deadstemc, tlai, leafn, leafn_storage, frootn, frootn_storage
+• leafp, leafp_storage, frootp, frootp_storage
+• livestemc, livestemc_storage, livestemn, livestemn_storage, livestemp, livestemp_storage
+• deadcrootc_storage, deadstemc_storage, livecrootc, livecrootc_storage
+• deadcrootn_storage, deadstemn_storage, livecrootn, livecrootn_storage
+• deadcrootp_storage, deadstemp_storage, livecrootp, livecrootp_storage
+• leafc_xfer, frootc_xfer, livestemc_xfer, deadstemc_xfer, livecrootc_xfer, deadcrootc_xfer, gresp_xfer
+• leafn_xfer, frootn_xfer, livestemn_xfer, deadstemn_xfer, livecrootn_xfer, deadcrootn_xfer
+• leafp_xfer, frootp_xfer, livestemp_xfer, deadstemp_xfer, livecrootp_xfer, deadcrootp_xfer
+• cpool, npool, ppool, xsmrpool
+
+2D VARIABLES (layered):
+• cwdn_vr, secondp_vr, cwdp_vr, soil3c_vr, soil4c_vr, cwdc_vr
+• soil1c_vr, soil1n_vr, soil1p_vr, soil2c_vr, soil2n_vr, soil2p_vr
+• soil3n_vr, soil3p_vr, soil4n_vr, soil4p_vr, litr1c_vr, litr2c_vr, litr3c_vr
+• litr1n_vr, litr2n_vr, litr3n_vr, litr1p_vr, litr2p_vr, litr3p_vr
+• sminn_vr, smin_no3_vr, smin_nh4_vr, labilep_vr, occlp_vr, primp_vr, solutionp_vr
+
+RESTART_COL_1D_VARS:
+# Optional. Keep empty unless needed.

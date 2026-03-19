@@ -84,21 +84,30 @@ def parse_cnp_data_input(path: str) -> Dict[str, object]:
         if alias_key in scalars and canonical_key not in scalars:
             scalars[canonical_key] = scalars[alias_key]
 
-    # 2) Expand DATA_ROOT variables in scalar values.
-    #    Supports: $DATA_ROOT, ${DATA_ROOT}, {DATA_ROOT}
-    data_root = scalars.get("DATA_ROOT") or ""
-    if data_root:
-        patterns = [
-            ("$DATA_ROOT", data_root),
-            ("${DATA_ROOT}", data_root),
-            ("{DATA_ROOT}", data_root),
-        ]
+    # 2) Expand variables embedded in scalar values.
+    #    Supports: $KEY, ${KEY}, {KEY}
+    #    This is needed for configs that reference other scalars,
+    #    e.g. `${EXPID}` inside DS2_PATH templates.
+    def _expand(value: str, var_map: Dict[str, str]) -> str:
+        new_v = value
+        for k, v in var_map.items():
+            if not k or not isinstance(v, str):
+                continue
+            new_v = new_v.replace(f"${k}", v)
+            new_v = new_v.replace(f"${{{k}}}", v)
+            new_v = new_v.replace(f"{{{k}}}", v)
+        return new_v
+
+    # Iteratively expand a few times to handle cases where one scalar
+    # template expands into another template.
+    var_map: Dict[str, str] = {k: v for k, v in scalars.items() if isinstance(v, str)}
+    for _ in range(5):
+        before = dict(scalars)
         for k, v in list(scalars.items()):
             if not isinstance(v, str):
                 continue
-            new_v = v
-            for needle, repl in patterns:
-                new_v = new_v.replace(needle, repl)
-            scalars[k] = new_v
+            scalars[k] = _expand(v, var_map)
+        if before == scalars:
+            break
 
     return {"scalars": scalars, "sections": sections}

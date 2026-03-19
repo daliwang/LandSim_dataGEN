@@ -895,12 +895,17 @@ def assemble_final_dataset() -> None:
     index_df = load_index_master()
     batch_ids = get_batch_ids(index_df)
     forcing_modules = list(config.FORCING_MODULE_MAP.keys())
+
+    target_modules = ["A_h0_list_y", "A_r_list_y"]
+    if config.INFERENCE_MODE:
+        print("[Assembler] inference mode: skipping target modules A_h0_list_y and A_r_list_y.")
+        target_modules = []
+
     mandatory_modules = [
         "A_ds1_surface",
         "A_ds2_history_x",
         "A_ds10_restart_x",
-        "A_h0_list_y",
-        "A_r_list_y",
+        *target_modules,
         "A_clm_params_pft",
     ] + forcing_modules
 
@@ -1022,6 +1027,9 @@ def run_extraction(to_build: List[str]) -> None:
     modules = to_build
     if "all" in modules:
         modules = config.ALL_MODULES.copy()
+        if config.INFERENCE_MODE:
+            # In inference configs, target/label artifacts may be intentionally omitted.
+            modules = [m for m in modules if m not in {"A_h0_list_y", "A_r_list_y"}]
     
     forcing_modules = [m for m in modules if m.startswith("A_forcing_")]
     if forcing_modules and config.FORCING_MODE == "datm":
@@ -1085,6 +1093,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Rebuild consolidated forcing files even if output files already exist.",
     )
+    parser.add_argument(
+        "--output-name",
+        type=str,
+        default=None,
+        help="Optional subdirectory name appended to BASE_OUTPUT_ROOT to isolate artifacts/final outputs (e.g. TESNorthERA510PCT).",
+    )
+    parser.add_argument(
+        "--inference",
+        action="store_true",
+        help="Inference build: skip target/label modules (A_h0_list_y, A_r_list_y) and assemble an inputs-only dataset.",
+    )
     return parser.parse_args()
 
 
@@ -1092,6 +1111,15 @@ def main() -> None:
     args = parse_args()
     if args.config_input:
         config.load_config(args.config_input)
+    config.INFERENCE_MODE = bool(args.inference)
+    if args.output_name:
+        # Recompute all derived output paths so artifacts/manifests/final_dataset
+        # live under BASE_OUTPUT_ROOT/<output_name>/...
+        config.BASE_OUTPUT_ROOT = os.path.join(config.BASE_OUTPUT_ROOT, args.output_name)
+        config.PIPELINE_ROOT = os.path.join(config.BASE_OUTPUT_ROOT, "modular_by_input_v1")
+        config.ARTIFACT_ROOT = os.path.join(config.PIPELINE_ROOT, "artifacts")
+        config.FINAL_OUTPUT_DIR = os.path.join(config.BASE_OUTPUT_ROOT, "final_dataset")
+        config.MANIFEST_ROOT = os.path.join(config.PIPELINE_ROOT, "manifests")
     ensure_dirs()
 
     if args.forcing_mode:

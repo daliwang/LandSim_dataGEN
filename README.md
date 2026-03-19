@@ -66,6 +66,27 @@ python3 scripts/run_pipeline.py --build all --assemble --forcing-mode datm
 ```
 
 
+### 1b) Inference (inputs-only)
+
+For inference configs where `H0_LIST_PATHS` / `R_LIST_PATHS` are intentionally omitted, run:
+
+```bash
+python3 scripts/run_pipeline.py \
+  --config-input config/CNP_TESNORTH_inference.txt \
+  --output-name TESNorthERA510PCT \
+  --build all --assemble --inference
+```
+
+To validate the produced batches:
+
+```bash
+python3 scripts/validate_final_dataset.py \
+  --config-input config/CNP_TESNORTH_inference.txt \
+  --output-name TESNorthERA510PCT \
+  --inference \
+  --max-batches 1
+```
+
 ### 2) Rebuild one module only (example: QBOT forcing)
 
 **Legacy mode** (`FORCING_MODE: legacy`):

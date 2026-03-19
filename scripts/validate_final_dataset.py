@@ -42,6 +42,17 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Validate only first N batches (useful for quick smoke tests).",
     )
+    parser.add_argument(
+        "--inference",
+        action="store_true",
+        help="Inference mode: validate inputs-only dataset (may not include Y_* target columns).",
+    )
+    parser.add_argument(
+        "--output-name",
+        type=str,
+        default=None,
+        help="Optional output-name to match run_pipeline.py --output-name (used to locate A_index_core artifacts).",
+    )
     return parser.parse_args()
 
 
@@ -94,6 +105,15 @@ def main() -> None:
     args = parse_args()
     if args.config_input:
         config.load_config(args.config_input)
+
+    config.INFERENCE_MODE = bool(args.inference)
+    if args.output_name:
+        # Mirror run_pipeline.py behavior so A_index_core is found under the same output root.
+        config.BASE_OUTPUT_ROOT = os.path.join(config.BASE_OUTPUT_ROOT, args.output_name)
+        config.PIPELINE_ROOT = os.path.join(config.BASE_OUTPUT_ROOT, "modular_by_input_v1")
+        config.ARTIFACT_ROOT = os.path.join(config.PIPELINE_ROOT, "artifacts")
+        config.FINAL_OUTPUT_DIR = os.path.join(config.BASE_OUTPUT_ROOT, "final_dataset")
+        config.MANIFEST_ROOT = os.path.join(config.PIPELINE_ROOT, "manifests")
     final_dir = args.final_dir or config.FINAL_OUTPUT_DIR
     final_dir = os.path.abspath(final_dir)
 
@@ -132,6 +152,10 @@ def main() -> None:
         "LABILE_P",
         "APATITE_P",
     ]
+
+    if config.INFERENCE_MODE:
+        # In inference mode we intentionally skip target/label modules, so Y_* columns may be absent.
+        single_value_columns = [c for c in single_value_columns if not c.startswith("Y_")]
 
     # Coordinate sanity
     lat_min, lat_max = float(config.LAT2), float(config.LAT1)
@@ -196,12 +220,13 @@ def main() -> None:
                     print(f"[batch {batch_id:02d}] {msg}")
 
         # Expanded PCT columns sanity: after assembly, base columns are expanded and base columns dropped.
-        for prefix in ["PCT_NAT_PFT_", "PCT_SAND_", "PCT_CLAY_"]:
-            if any(c.startswith(prefix) for c in df.columns):
-                continue
-            # Only warn if the original base columns were likely requested.
-            # (We can’t easily know from this script whether they were configured; so keep it a warning.)
-            print(f"[batch {batch_id:02d}] warning: no columns found with prefix {prefix}")
+        # In inference mode this can legitimately differ depending on which modules were included.
+        if not config.INFERENCE_MODE:
+            for prefix in ["PCT_NAT_PFT_", "PCT_SAND_", "PCT_CLAY_"]:
+                if any(c.startswith(prefix) for c in df.columns):
+                    continue
+                # Only warn if the original base columns were likely requested.
+                print(f"[batch {batch_id:02d}] warning: no columns found with prefix {prefix}")
 
         print(f"[batch {batch_id:02d}] OK (so far)")
 
