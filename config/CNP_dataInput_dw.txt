@@ -6,20 +6,31 @@
 BASE_OUTPUT_ROOT: output
 
 # Input files
-DS1_PATH: /gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TES_NORTH_dataset/ERA5_10PCTSITES/domain_surfdata/TESNorthERA510PCT_surfdata.TES_NORTHERA5.4km.1d.NLCD.c260303.nc
-DS2_PATH: /gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TES_NORTH_dataset/ERA5_10PCTSITES/history_restart_files/uELM_TESNorthERA510PCT_I1850CNPRDCTCBC.elm.h0.0021-01-01-00000.nc
-DS10_PATH: /gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TES_NORTH_dataset/ERA5_10PCTSITES/history_restart_files/uELM_TESNorthERA510PCT_I1850CNPRDCTCBC.elm.r.0021-01-01-00000.nc
-H0_LIST_PATHS: /gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TES_NORTH_dataset/ERA5_10PCTSITES/history_restart_files/uELM_TESNorthERA510PCT_I1850CNPRDCTCBC_finalspin.elm.h0.1101-01-01-00000.nc
-R_LIST_PATHS: /gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TES_NORTH_dataset/ERA5_10PCTSITES/history_restart_files/uELM_TESNorthERA510PCT_I1850CNPRDCTCBC_finalspin.elm.r.1101-01-01-00000.nc
-CLM_PARAMS_PATH: /gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TES_NORTH_dataset/ERA5_10PCTSITES/history_restart_files/clm_params_c211124.nc
+DATA_ROOT: /gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TES_NORTH_dataset/ERA5_10PCTSITES
 
-## Legacy forcing inputs (Trendy) – no longer used for TES_NORTH
-#DS4_PATH: /global/cfs/cdirs/m4814/daweigao/14_Code/0_dataset_construction/6_all_trendy_original_data/crujra.v2.5.5d_FLDS_1901-2023_z01.nc
-#DS5_PATH: /global/cfs/cdirs/m4814/daweigao/14_Code/0_dataset_construction/6_all_trendy_original_data/crujra.v2.5.5d_PSRF_1901-2023_z01.nc
-#DS6_PATH: /global/cfs/cdirs/m4814/daweigao/14_Code/0_dataset_construction/6_all_trendy_original_data/crujra.v2.5.5d_FSDS_1901-2023_z01.nc
-#DS7_PATH: /global/cfs/cdirs/m4814/daweigao/14_Code/0_dataset_construction/6_all_trendy_original_data/crujra.v2.5.5d_QBOT_1901-2023_z01.nc
-#DS8_PATH: /global/cfs/cdirs/m4814/daweigao/14_Code/0_dataset_construction/6_all_trendy_original_data/crujra.v2.5.5d_PRECTmms_1901-2023_z01.nc
-#DS9_PATH: /global/cfs/cdirs/m4814/daweigao/14_Code/0_dataset_construction/6_all_trendy_original_data/crujra.v2.5.5d_TBOT_1901-2023_z01.nc
+# NOTE:
+# The parser in this repo requires the exact keys below (DS1_PATH, DS2_PATH, ...).
+# For readability, we keep those required keys, and also provide "alias" names.
+
+# surfdata_path
+DS1_PATH: ${DATA_ROOT}/domain_surfdata/TESNorthERA510PCT_surfdata.TES_NORTHERA5.4km.1d.NLCD.c260303.nc
+
+# init_h0_file
+DS2_PATH: ${DATA_ROOT}/history_restart_files/uELM_TESNorthERA510PCT_I1850CNPRDCTCBC.elm.h0.0021-01-01-00000.nc
+
+# init_r_path
+DS10_PATH: ${DATA_ROOT}/history_restart_files/uELM_TESNorthERA510PCT_I1850CNPRDCTCBC.elm.r.0021-01-01-00000.nc
+
+# target_ho_path
+H0_LIST_PATHS: ${DATA_ROOT}/history_restart_files/uELM_TESNorthERA510PCT_I1850CNPRDCTCBC_finalspin.elm.h0.1101-01-01-00000.nc
+
+# target_r_path
+R_LIST_PATHS: ${DATA_ROOT}/history_restart_files/uELM_TESNorthERA510PCT_I1850CNPRDCTCBC_finalspin.elm.r.1101-01-01-00000.nc
+
+# clm_params_path
+CLM_PARAMS_PATH: ${DATA_ROOT}/history_restart_files/clm_params_c211124.nc
+
+DS4_PATH: output/forcing_netcdf_datm_1980_1999/FLDS_1980-1999.nc
 
 # Forcing extraction mode
 #   legacy: read consolidated forcing files (current logic)
@@ -28,7 +39,7 @@ FORCING_MODE: datm
 # DATM forcing parameters (only used when FORCING_MODE=datm)
 # When FORCING_MODE=legacy: These parameters are IGNORED. Use DS4_PATH~DS9_PATH instead.
 # When FORCING_MODE=datm: These parameters are REQUIRED to locate DATM monthly files.
-DATM_ROOT: /gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TES_NORTH_dataset/ERA5_10PCTSITES/forcing
+DATM_ROOT: ${DATA_ROOT}/forcing
 DATM_START_YEAR: 1980
 DATM_END_YEAR: 1999
 
@@ -43,26 +54,15 @@ DATM_QBOT_TOKEN: TPQWL
 DATM_PRECTMMS_TOKEN: Prec
 DATM_TBOT_TOKEN: TPQWL
 
-# DATM_*_PATH: Direct path to forcing file (optional, overrides TOKEN search)
-#   - If set: Use this exact path, skip file search in DATM_ROOT
-#   - If empty: Use DATM_ROOT + DATM_*_TOKEN to search for monthly files
-#   - Priority: DATM_*_PATH > DATM_ROOT + DATM_*_TOKEN search
-DATM_FLDS_PATH:
-DATM_PSRF_PATH:
-DATM_FSDS_PATH:
-DATM_QBOT_PATH:
-DATM_PRECTMMS_PATH:
-DATM_TBOT_PATH:
-
 # Domain and batching
-LAT1: 90
-LAT2: -90
-LON1: 0
-LON2: 360
-BATCH_SIZE: 1000
+LAT1: 60
+LAT2: 42
+LON1: -119
+LON2: -65
+BATCH_SIZE: 50
 
 # Time-series shape (for monthly conversion)
-TIME_SERIES_LENGTH: 179580
+TIME_SERIES_LENGTH: 58400
 STEPS_PER_DAY: 8
 YEARS_IN_DATA: 20
 

@@ -113,7 +113,14 @@ def build_index_core() -> None:
 
         lat_indices = np.where((lats >= config.LAT2) & (lats <= config.LAT1))[0]
         lon_indices = np.where((lons >= config.LON1) & (lons <= config.LON2))[0]
-        filtered_coordinates = [(i, j) for i in lat_indices for j in lon_indices if landmask[i, j] == 1]
+
+        # Support both 2D (lat, lon) and 1D (lat-only) landmask definitions.
+        if landmask.ndim == 2:
+            filtered_coordinates = [(i, j) for i in lat_indices for j in lon_indices if landmask[i, j] == 1]
+        elif landmask.ndim == 1:
+            filtered_coordinates = [(i, j) for i in lat_indices for j in lon_indices if landmask[i] == 1]
+        else:
+            raise ValueError(f"Unsupported landmask shape: {landmask.shape}")
 
         query_coords = np.array([(lats[i], lons[j]) for i, j in filtered_coordinates], dtype=float)
 

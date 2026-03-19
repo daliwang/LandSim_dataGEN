@@ -133,6 +133,10 @@ def _apply_cnp_data_input_overrides(config_path: str) -> None:
     global ACTIVE_CONFIG_INPUT_FILE
 
     ACTIVE_CONFIG_INPUT_FILE = config_path
+
+    # Reset file path mappings so previous config values do not leak into
+    # subsequent loads when a key is omitted in the new config file.
+    FILE_PATHS.clear()
     parsed = parse_cnp_data_input(config_path)
     scalars = parsed.get("scalars", {})
     sections = parsed.get("sections", {})
