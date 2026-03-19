@@ -59,7 +59,7 @@ LAT1: 60
 LAT2: 42
 LON1: -119
 LON2: -65
-BATCH_SIZE: 50
+BATCH_SIZE: 2000
 
 # Time-series shape (for monthly conversion)
 TIME_SERIES_LENGTH: 58400

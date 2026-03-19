@@ -45,7 +45,7 @@ FORCING_MODULE_MAP = {
 }
 
 # Note: These will be overridden by CNP_dataInput.txt if defined there
-FORCING_MODE = "legacy"
+FORCING_MODE = "datm"
 DATM_ROOT = ""
 DATM_START_YEAR = 1901
 DATM_END_YEAR = 2023
