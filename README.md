@@ -27,6 +27,10 @@ It contains:
 - `scripts/run_assembly.py`: assembly only (build final dataset from artifacts)
 - `scripts/run_pipeline.py`: legacy combined entrypoint (still supported)
 
+## Docs
+
+- `docs/build_index_core_performance_report.md`: short note on how `build_index_core` works and why it can be slow
+
 ## Forcing extraction mode
 
 - `FORCING_MODE: legacy`
@@ -34,6 +38,7 @@ It contains:
 - `FORCING_MODE: datm`
   - DATM/new uELM forcing mode
   - supports direct per-variable path (`DATM_*_PATH`) or monthly scan from `DATM_ROOT` + token map
+  - DS4~DS9 coordinates are normalized to `ds2` mesh during preprocessing.
 
 ## Commands
 

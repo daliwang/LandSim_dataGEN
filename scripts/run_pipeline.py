@@ -90,6 +90,73 @@ def _read_forcing_coords_2d(ds_forcing: nc.Dataset) -> np.ndarray:
     raise ValueError(f"Unsupported forcing coord shapes: {lat_data.shape}, {lon_data.shape}")
 
 
+def _build_coord_key_map(coords: np.ndarray, decimals: int = 6) -> Dict[tuple, int]:
+    """
+    Build a coordinate->index map using rounded (lat, lon) keys.
+    Duplicate rounded keys are rejected because they make direct mapping ambiguous.
+    """
+    coord_map: Dict[tuple, int] = {}
+    for idx, (lat_val, lon_val) in enumerate(np.asarray(coords, dtype=float)):
+        key = (round(float(lat_val), decimals), round(float(lon_val), decimals))
+        if key in coord_map:
+            raise ValueError(
+                f"Duplicate rounded coordinate key detected at decimals={decimals}: {key}. "
+                "Cannot build unambiguous direct same-mesh mapping."
+            )
+        coord_map[key] = int(idx)
+    return coord_map
+
+
+def _direct_same_mesh_indices(
+    query_coords: np.ndarray,
+    ds_restart: nc.Dataset,
+    ds_forcing: nc.Dataset,
+    decimals: int = 6,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Directly map query coordinates to restart/forcing indices when datasets share
+    the same mesh (DATM assumption). This avoids KD-tree nearest-neighbor search
+    and enforces coordinate consistency.
+    """
+    restart_coords = np.vstack((ds_restart.variables["grid1d_lat"][:], ds_restart.variables["grid1d_lon"][:])).T
+    forcing_coords = _read_forcing_coords_2d(ds_forcing)
+
+    restart_map = _build_coord_key_map(restart_coords, decimals=decimals)
+    forcing_map = _build_coord_key_map(forcing_coords, decimals=decimals)
+
+    restart_indices = np.empty(len(query_coords), dtype=np.int64)
+    forcing_indices = np.empty(len(query_coords), dtype=np.int64)
+    tolerance = 10 ** (-decimals)
+
+    for row_id, (lat_val, lon_val) in enumerate(np.asarray(query_coords, dtype=float)):
+        key = (round(float(lat_val), decimals), round(float(lon_val), decimals))
+        if key not in restart_map:
+            raise ValueError(
+                f"DATM same-mesh mapping failed: query point {key} not found in restart grid."
+            )
+        if key not in forcing_map:
+            raise ValueError(
+                f"DATM same-mesh mapping failed: query point {key} not found in forcing grid."
+            )
+
+        r_idx = int(restart_map[key])
+        f_idx = int(forcing_map[key])
+        restart_indices[row_id] = r_idx
+        forcing_indices[row_id] = f_idx
+
+        # Validate the mapped restart and forcing coordinates align.
+        if (
+            abs(float(restart_coords[r_idx, 0]) - float(forcing_coords[f_idx, 0])) > tolerance
+            or abs(float(restart_coords[r_idx, 1]) - float(forcing_coords[f_idx, 1])) > tolerance
+        ):
+            raise ValueError(
+                "DATM same-mesh mapping mismatch: restart and forcing coordinates differ "
+                f"for key {key} (restart_idx={r_idx}, forcing_idx={f_idx})."
+            )
+
+    return restart_indices, forcing_indices
+
+
 def load_index_master() -> pd.DataFrame:
     index_path = os.path.join(module_dir("A_index_core"), "index_master.pkl")
     if not os.path.exists(index_path):
@@ -113,16 +180,80 @@ def build_index_core() -> None:
 
         lat_indices = np.where((lats >= config.LAT2) & (lats <= config.LAT1))[0]
         lon_indices = np.where((lons >= config.LON1) & (lons <= config.LON2))[0]
-        filtered_coordinates = [(i, j) for i in lat_indices for j in lon_indices if landmask[i, j] == 1]
 
-        query_coords = np.array([(lats[i], lons[j]) for i, j in filtered_coordinates], dtype=float)
+        cell_indices = None
 
-        restart_tree = cKDTree(np.vstack((ds10.variables["grid1d_lat"][:], ds10.variables["grid1d_lon"][:])).T)
-        _, restart_indices = restart_tree.query(query_coords, k=1)
+        # Support both structured 2D (lat, lon) and unstructured 1D meshes.
+        if landmask.ndim == 2:
+            filtered_coordinates = [(i, j) for i in lat_indices for j in lon_indices if landmask[i, j] == 1]
+            query_coords = np.array([(lats[i], lons[j]) for i, j in filtered_coordinates], dtype=float)
+        elif landmask.ndim == 1:
+            # Unstructured grid: lat/lon/landmask index the same gridcell axis.
+            if lats.ndim != 1 or lons.ndim != 1 or lats.shape[0] != lons.shape[0] or landmask.shape[0] != lats.shape[0]:
+                raise ValueError(
+                    "Unsupported 1D mesh definition: expected lat/lon/landmask to be 1D and aligned."
+                )
+            cell_indices = np.where(
+                (lats >= config.LAT2)
+                & (lats <= config.LAT1)
+                & (lons >= config.LON1)
+                & (lons <= config.LON2)
+                & (landmask == 1)
+            )[0]
+            filtered_coordinates = [(int(idx), int(idx)) for idx in cell_indices]
+            query_coords = np.column_stack((lats[cell_indices], lons[cell_indices])).astype(float)
+        else:
+            raise ValueError(f"Unsupported landmask shape: {landmask.shape}")
 
-        forcing_coords = _read_forcing_coords_2d(ds4)
-        forcing_tree = cKDTree(forcing_coords)
-        _, forcing_indices = forcing_tree.query(query_coords, k=1)
+        print(f"[A_index_core] selected cells after filtering: {len(filtered_coordinates)}")
+
+        if config.FORCING_MODE == "datm":
+            if landmask.ndim == 1 and cell_indices is not None:
+                print("[A_index_core] DATM mode: using direct same-mesh index mapping (no KD-tree).")
+                restart_coords = np.vstack((ds10.variables["grid1d_lat"][:], ds10.variables["grid1d_lon"][:])).T
+                forcing_coords = _read_forcing_coords_2d(ds4)
+                n_cells = int(lats.shape[0])
+                if restart_coords.shape[0] != n_cells or forcing_coords.shape[0] != n_cells:
+                    raise ValueError(
+                        "DATM same-mesh index mapping requires ds2/ds10/ds4 to have aligned 1D grid size. "
+                        f"Got ds2={n_cells}, ds10={restart_coords.shape[0]}, ds4={forcing_coords.shape[0]}."
+                    )
+
+                sel = np.asarray(cell_indices, dtype=np.int64)
+                tol = 1e-6
+                if sel.size > 0:
+                    lat_diff_ds10 = np.abs(np.asarray(lats[sel], dtype=float) - np.asarray(restart_coords[sel, 0], dtype=float))
+                    lon_diff_ds10 = np.abs(np.asarray(lons[sel], dtype=float) - np.asarray(restart_coords[sel, 1], dtype=float))
+                    if np.max(lat_diff_ds10) > tol or np.max(lon_diff_ds10) > tol:
+                        raise ValueError(
+                            "DATM same-mesh validation failed between ds2 and ds10 coordinates: "
+                            f"max_lat_diff={float(np.max(lat_diff_ds10)):.6g}, "
+                            f"max_lon_diff={float(np.max(lon_diff_ds10)):.6g}"
+                        )
+
+                    lat_diff_ds4 = np.abs(np.asarray(lats[sel], dtype=float) - np.asarray(forcing_coords[sel, 0], dtype=float))
+                    lon_diff_ds4 = np.abs(np.asarray(lons[sel], dtype=float) - np.asarray(forcing_coords[sel, 1], dtype=float))
+                    if np.max(lat_diff_ds4) > tol or np.max(lon_diff_ds4) > tol:
+                        print(
+                            "[A_index_core] warning: ds4 coordinates do not match ds2 in DATM 1D mode: "
+                            f"max_lat_diff={float(np.max(lat_diff_ds4)):.6g}, "
+                            f"max_lon_diff={float(np.max(lon_diff_ds4)):.6g}. "
+                            "Proceeding with direct same-index mapping; consider rebuilding forcing "
+                            "intermediates to embed ds2 mesh coordinates."
+                        )
+
+                restart_indices = sel.copy()
+                forcing_indices = sel.copy()
+            else:
+                print("[A_index_core] DATM mode: using direct same-mesh coordinate mapping (no KD-tree).")
+                restart_indices, forcing_indices = _direct_same_mesh_indices(query_coords, ds10, ds4, decimals=6)
+        else:
+            restart_tree = cKDTree(np.vstack((ds10.variables["grid1d_lat"][:], ds10.variables["grid1d_lon"][:])).T)
+            _, restart_indices = restart_tree.query(query_coords, k=1)
+
+            forcing_coords = _read_forcing_coords_2d(ds4)
+            forcing_tree = cKDTree(forcing_coords)
+            _, forcing_indices = forcing_tree.query(query_coords, k=1)
 
         rows = []
         for row_id, (i, j) in enumerate(filtered_coordinates):
@@ -175,9 +306,24 @@ def build_ds1_surface() -> None:
         for batch_id, batch_df in index_df.groupby("batch_id", sort=True):
             rows = {"__row_id": batch_df["__row_id"].tolist()}
             for var in config.STATIC_SURFACE_VARS_2D:
-                rows[var] = [float(ds1.variables[var][i, j]) for i, j in zip(batch_df["lat_idx"], batch_df["lon_idx"])]
+                arr = ds1.variables[var]
+                if arr.ndim == 1:
+                    rows[var] = [float(arr[i]) for i in batch_df["lat_idx"]]
+                elif arr.ndim == 2:
+                    rows[var] = [float(arr[i, j]) for i, j in zip(batch_df["lat_idx"], batch_df["lon_idx"])]
+                else:
+                    raise ValueError(f"Unsupported surface var shape for {var}: {arr.shape}")
             for var in config.STATIC_SURFACE_VARS_3D:
-                rows[var] = [np.asarray(ds1.variables[var][:, i, j], dtype=float).tolist() for i, j in zip(batch_df["lat_idx"], batch_df["lon_idx"])]
+                arr = ds1.variables[var]
+                if arr.ndim == 2:
+                    rows[var] = [np.asarray(arr[:, i], dtype=float).tolist() for i in batch_df["lat_idx"]]
+                elif arr.ndim == 3:
+                    rows[var] = [
+                        np.asarray(arr[:, i, j], dtype=float).tolist()
+                        for i, j in zip(batch_df["lat_idx"], batch_df["lon_idx"])
+                    ]
+                else:
+                    raise ValueError(f"Unsupported layered surface var shape for {var}: {arr.shape}")
             pd.DataFrame(rows).to_pickle(os.path.join(out_dir, f"batch_{int(batch_id):02d}.pkl"))
 
         save_manifest("A_ds1_surface", {"module": "A_ds1_surface", "sources": [source_meta(config.FILE_PATHS["ds1"])]})
@@ -194,9 +340,21 @@ def build_ds2_history_x() -> None:
         out_dir = module_dir("A_ds2_history_x")
         for batch_id, batch_df in index_df.groupby("batch_id", sort=True):
             rows = {"__row_id": batch_df["__row_id"].tolist()}
-            rows["landfrac"] = [float(ds2.variables["landfrac"][i, j]) for i, j in zip(batch_df["lat_idx"], batch_df["lon_idx"])]
+            landfrac = ds2.variables["landfrac"]
+            if landfrac.ndim == 1:
+                rows["landfrac"] = [float(landfrac[i]) for i in batch_df["lat_idx"]]
+            elif landfrac.ndim == 2:
+                rows["landfrac"] = [float(landfrac[i, j]) for i, j in zip(batch_df["lat_idx"], batch_df["lon_idx"])]
+            else:
+                raise ValueError(f"Unsupported landfrac shape: {landfrac.shape}")
             for var in config.HISTORY_GRID_VARS_2D:
-                rows[var] = [float(ds2.variables[var][0, i, j]) for i, j in zip(batch_df["lat_idx"], batch_df["lon_idx"])]
+                arr = ds2.variables[var]
+                if arr.ndim == 2:
+                    rows[var] = [float(arr[0, i]) for i in batch_df["lat_idx"]]
+                elif arr.ndim == 3:
+                    rows[var] = [float(arr[0, i, j]) for i, j in zip(batch_df["lat_idx"], batch_df["lon_idx"])]
+                else:
+                    raise ValueError(f"Unsupported history var shape for {var}: {arr.shape}")
             pd.DataFrame(rows).to_pickle(os.path.join(out_dir, f"batch_{int(batch_id):02d}.pkl"))
 
         save_manifest("A_ds2_history_x", {"module": "A_ds2_history_x", "sources": [source_meta(config.FILE_PATHS["ds2"])]})
@@ -217,7 +375,13 @@ def build_h0_list_y() -> None:
         for batch_id, batch_df in index_df.groupby("batch_id", sort=True):
             rows = {"__row_id": batch_df["__row_id"].tolist()}
             for var in config.HISTORY_GRID_VARS_2D:
-                rows[f"Y_{var}"] = [float(ds_h0.variables[var][0, i, j]) for i, j in zip(batch_df["lat_idx"], batch_df["lon_idx"])]
+                arr = ds_h0.variables[var]
+                if arr.ndim == 2:
+                    rows[f"Y_{var}"] = [float(arr[0, i]) for i in batch_df["lat_idx"]]
+                elif arr.ndim == 3:
+                    rows[f"Y_{var}"] = [float(arr[0, i, j]) for i, j in zip(batch_df["lat_idx"], batch_df["lon_idx"])]
+                else:
+                    raise ValueError(f"Unsupported target history var shape for {var}: {arr.shape}")
             pd.DataFrame(rows).to_pickle(os.path.join(out_dir, f"batch_{int(batch_id):02d}.pkl"))
 
         save_manifest(
@@ -341,6 +505,18 @@ def _monthly_mean_series_from_datm_files(var_name: str, datm_files: List[str]):
     return series, lat_flat, lon_flat
 
 
+def _reference_mesh_coords_from_ds2() -> tuple[np.ndarray, np.ndarray]:
+    """
+    Read authoritative mesh coordinates from ds2 when running DATM same-mesh workflow.
+    """
+    with nc.Dataset(config.FILE_PATHS["ds2"]) as ds2:
+        if "lat" not in ds2.variables or "lon" not in ds2.variables:
+            raise KeyError("ds2 must include lat/lon variables for same-mesh DATM workflow.")
+        lat = np.asarray(ds2.variables["lat"][:], dtype=float).reshape(-1)
+        lon = np.asarray(ds2.variables["lon"][:], dtype=float).reshape(-1)
+    return lat, lon
+
+
 def prepare_forcing_inputs_from_datm(force_rebuild: bool = False, required_vars: List[str] = None) -> None:
     """
     Build consolidated forcing NetCDF files (DS4~DS9) from DATM monthly files.
@@ -385,6 +561,20 @@ def prepare_forcing_inputs_from_datm(force_rebuild: bool = False, required_vars:
         print(f"[ForcingPrep] building {var_name} -> {target_path}")
 
         series, lat_flat, lon_flat = _monthly_mean_series_from_datm_files(var_name, datm_files)
+        try:
+            ref_lat, ref_lon = _reference_mesh_coords_from_ds2()
+            if ref_lat.shape[0] == series.shape[1] and ref_lon.shape[0] == series.shape[1]:
+                lat_flat = ref_lat
+                lon_flat = ref_lon
+                print(f"[ForcingPrep] using ds2 mesh coordinates for {var_name}")
+            else:
+                print(
+                    f"[ForcingPrep] warning: ds2 mesh size ({ref_lat.shape[0]}) does not match "
+                    f"{var_name} grid size ({series.shape[1]}). Keeping DATM file coordinates."
+                )
+        except Exception as exc:
+            print(f"[ForcingPrep] warning: could not use ds2 mesh coordinates for {var_name}: {exc}")
+
         n_months, n_grid = series.shape
         time_index = np.arange(n_months, dtype=np.int32)
         grid_ids = np.arange(n_grid, dtype=np.int32)
@@ -858,6 +1048,12 @@ def run_assembly() -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Modular dataset construction by input file")
     parser.add_argument(
+        "--config-input",
+        type=str,
+        default=None,
+        help="Path to CNP_dataInput-style config file (default: config/CNP_dataInput.txt)",
+    )
+    parser.add_argument(
         "--build",
         nargs="+",
         default=[],
@@ -894,6 +1090,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.config_input:
+        config.load_config(args.config_input)
     ensure_dirs()
 
     if args.forcing_mode:

@@ -65,4 +65,40 @@ def parse_cnp_data_input(path: str) -> Dict[str, object]:
     for key, values in sections.items():
         sections[key] = list(dict.fromkeys(values))
 
+    # -----------------------------
+    # Flexibility upgrades
+    # -----------------------------
+    # 1) Alias keys for readability in config files.
+    #    The downstream loader expects canonical keys like DS1_PATH, DS2_PATH, etc.
+    alias_to_canonical = {
+        "surfdata_path": "DS1_PATH",
+        "init_h0_file": "DS2_PATH",
+        "init_r_path": "DS10_PATH",
+        "target_ho_path": "H0_LIST_PATHS",
+        "target_r_path": "R_LIST_PATHS",
+        "clm_params_path": "CLM_PARAMS_PATH",
+        # Forcing readability (optional)
+        "forcing_root": "DATM_ROOT",
+    }
+    for alias_key, canonical_key in alias_to_canonical.items():
+        if alias_key in scalars and canonical_key not in scalars:
+            scalars[canonical_key] = scalars[alias_key]
+
+    # 2) Expand DATA_ROOT variables in scalar values.
+    #    Supports: $DATA_ROOT, ${DATA_ROOT}, {DATA_ROOT}
+    data_root = scalars.get("DATA_ROOT") or ""
+    if data_root:
+        patterns = [
+            ("$DATA_ROOT", data_root),
+            ("${DATA_ROOT}", data_root),
+            ("{DATA_ROOT}", data_root),
+        ]
+        for k, v in list(scalars.items()):
+            if not isinstance(v, str):
+                continue
+            new_v = v
+            for needle, repl in patterns:
+                new_v = new_v.replace(needle, repl)
+            scalars[k] = new_v
+
     return {"scalars": scalars, "sections": sections}
