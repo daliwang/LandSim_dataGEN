@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Dict, List
 
@@ -30,6 +31,18 @@ try:
     import cftime
 except Exception:
     cftime = None
+
+
+# 3-hourly E3SM cpl.ha2x3h variable name map.
+# FSDS/PRECTmms are sums of multiple variables.
+DATM_3HLY_VAR_MAP = {
+    "FLDS": "a2x3h_Faxa_lwdn",
+    "PSRF": "a2x3h_Sa_pbot",
+    "FSDS": "a2x3h_Faxa_swndr+a2x3h_Faxa_swvdr+a2x3h_Faxa_swndf+a2x3h_Faxa_swvdf",
+    "QBOT": "a2x3h_Sa_shum",
+    "PRECTmms": "a2x3h_Faxa_rainc+a2x3h_Faxa_rainl+a2x3h_Faxa_snowc+a2x3h_Faxa_snowl",
+    "TBOT": "a2x3h_Sa_tbot",
+}
 
 
 def ensure_dirs() -> None:
@@ -90,6 +103,73 @@ def _read_forcing_coords_2d(ds_forcing: nc.Dataset) -> np.ndarray:
     raise ValueError(f"Unsupported forcing coord shapes: {lat_data.shape}, {lon_data.shape}")
 
 
+def _normalize_lon_360(values: np.ndarray) -> np.ndarray:
+    arr = np.asarray(values, dtype=float)
+    return np.mod(arr + 360.0, 360.0)
+
+
+def _normalize_coords_lon_360(coords: np.ndarray) -> np.ndarray:
+    arr = np.asarray(coords, dtype=float).copy()
+    if arr.ndim != 2 or arr.shape[1] != 2:
+        raise ValueError(f"Expected coords with shape (n,2), got {arr.shape}")
+    arr[:, 1] = _normalize_lon_360(arr[:, 1])
+    return arr
+
+
+def _build_forcing_index_mapping(index_df: pd.DataFrame, ds_forcing: nc.Dataset) -> np.ndarray:
+    """
+    Build forcing indices by matching sample coordinates to forcing coordinates.
+    This follows Zhuowei-style standalone forcing spatial mapping.
+    """
+    forcing_coords = _read_forcing_coords_2d(ds_forcing)
+    forcing_coords = np.asarray(forcing_coords, dtype=float)
+    if forcing_coords.ndim != 2 or forcing_coords.shape[1] != 2:
+        raise ValueError(f"Unexpected forcing coord matrix shape: {forcing_coords.shape}")
+
+    forcing_coords[:, 1] = _normalize_lon_360(forcing_coords[:, 1])
+    query_coords = index_df[["Latitude", "Longitude"]].to_numpy(dtype=float)
+    query_coords[:, 1] = _normalize_lon_360(query_coords[:, 1])
+
+    forcing_tree = cKDTree(forcing_coords)
+    distances, nearest_indices = forcing_tree.query(query_coords, k=1)
+    print(
+        "[ForcingMap] built nearest mapping: "
+        f"samples={len(query_coords)}, forcing_points={forcing_coords.shape[0]}, "
+        f"mean_deg={float(np.mean(distances)):.4f}, p95_deg={float(np.percentile(distances,95)):.4f}, "
+        f"max_deg={float(np.max(distances)):.4f}"
+    )
+    return nearest_indices.astype(np.int64)
+
+
+def _log_batch_progress(module_name: str, current: int, total: int, batch_id: int, *, every: int = 10) -> None:
+    if total <= 0:
+        return
+    if current == 1 or current == total or (current % max(1, every) == 0):
+        pct = (100.0 * current) / float(total)
+        print(f"[{module_name}] progress {current}/{total} ({pct:.1f}%), batch={batch_id}")
+
+
+def _format_elapsed(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes = int(seconds // 60)
+    sec = seconds - minutes * 60
+    if minutes < 60:
+        return f"{minutes}m{sec:04.1f}s"
+    hours = int(minutes // 60)
+    minutes = minutes % 60
+    return f"{hours}h{minutes:02d}m{sec:04.1f}s"
+
+
+def _run_with_timing(label: str, fn, *args, **kwargs):
+    t0 = time.time()
+    print(f"[Timer] start {label}")
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        print(f"[Timer] done {label} (elapsed {_format_elapsed(time.time() - t0)})")
+
+
 def _build_coord_key_map(coords: np.ndarray, decimals: int = 6) -> Dict[tuple, int]:
     """
     Build a coordinate->index map using rounded (lat, lon) keys.
@@ -120,15 +200,20 @@ def _direct_same_mesh_indices(
     """
     restart_coords = np.vstack((ds_restart.variables["grid1d_lat"][:], ds_restart.variables["grid1d_lon"][:])).T
     forcing_coords = _read_forcing_coords_2d(ds_forcing)
+    query_coords = np.asarray(query_coords, dtype=float)
 
-    restart_map = _build_coord_key_map(restart_coords, decimals=decimals)
-    forcing_map = _build_coord_key_map(forcing_coords, decimals=decimals)
+    restart_coords_norm = _normalize_coords_lon_360(restart_coords)
+    forcing_coords_norm = _normalize_coords_lon_360(forcing_coords)
+    query_coords_norm = _normalize_coords_lon_360(query_coords)
 
-    restart_indices = np.empty(len(query_coords), dtype=np.int64)
-    forcing_indices = np.empty(len(query_coords), dtype=np.int64)
+    restart_map = _build_coord_key_map(restart_coords_norm, decimals=decimals)
+    forcing_map = _build_coord_key_map(forcing_coords_norm, decimals=decimals)
+
+    restart_indices = np.empty(len(query_coords_norm), dtype=np.int64)
+    forcing_indices = np.empty(len(query_coords_norm), dtype=np.int64)
     tolerance = 10 ** (-decimals)
 
-    for row_id, (lat_val, lon_val) in enumerate(np.asarray(query_coords, dtype=float)):
+    for row_id, (lat_val, lon_val) in enumerate(query_coords_norm):
         key = (round(float(lat_val), decimals), round(float(lon_val), decimals))
         if key not in restart_map:
             raise ValueError(
@@ -146,8 +231,8 @@ def _direct_same_mesh_indices(
 
         # Validate the mapped restart and forcing coordinates align.
         if (
-            abs(float(restart_coords[r_idx, 0]) - float(forcing_coords[f_idx, 0])) > tolerance
-            or abs(float(restart_coords[r_idx, 1]) - float(forcing_coords[f_idx, 1])) > tolerance
+            abs(float(restart_coords_norm[r_idx, 0]) - float(forcing_coords_norm[f_idx, 0])) > tolerance
+            or abs(float(restart_coords_norm[r_idx, 1]) - float(forcing_coords_norm[f_idx, 1])) > tolerance
         ):
             raise ValueError(
                 "DATM same-mesh mapping mismatch: restart and forcing coordinates differ "
@@ -155,6 +240,26 @@ def _direct_same_mesh_indices(
             )
 
     return restart_indices, forcing_indices
+
+
+def _nearest_forcing_indices_by_kdtree(query_coords: np.ndarray, ds_forcing: nc.Dataset) -> np.ndarray:
+    """
+    Zhuowei-style fallback: map query coordinates to forcing grid by nearest
+    neighbor on forcing coordinates.
+    """
+    forcing_coords = _read_forcing_coords_2d(ds_forcing)
+    forcing_coords_norm = _normalize_coords_lon_360(forcing_coords)
+    query_coords_norm = _normalize_coords_lon_360(np.asarray(query_coords, dtype=float))
+
+    forcing_tree = cKDTree(forcing_coords_norm)
+    distances, forcing_indices = forcing_tree.query(query_coords_norm, k=1)
+    print(
+        "[A_index_core] DATM fallback forcing KDTree mapping: "
+        f"samples={len(query_coords_norm)}, forcing_points={forcing_coords_norm.shape[0]}, "
+        f"mean_deg={float(np.mean(distances)):.4f}, p95_deg={float(np.percentile(distances, 95)):.4f}, "
+        f"max_deg={float(np.max(distances)):.4f}"
+    )
+    return forcing_indices.astype(np.int64)
 
 
 def load_index_master() -> pd.DataFrame:
@@ -168,47 +273,125 @@ def get_batch_ids(index_df: pd.DataFrame) -> List[int]:
     return sorted(index_df["batch_id"].unique().tolist())
 
 
+def _get_grid_from_ds1(ds1: nc.Dataset):
+    """
+    Fallback grid reader when ds2 is unavailable.
+    Uses LATIXY/LONGXY and builds a landmask from LANDFRAC_PFT when possible.
+    """
+    if "LATIXY" in ds1.variables and "LONGXY" in ds1.variables:
+        lat_2d = np.asarray(ds1.variables["LATIXY"][:], dtype=float)
+        lon_2d = np.asarray(ds1.variables["LONGXY"][:], dtype=float)
+    elif "lat" in ds1.variables and "lon" in ds1.variables:
+        lat_1d = np.asarray(ds1.variables["lat"][:], dtype=float)
+        lon_1d = np.asarray(ds1.variables["lon"][:], dtype=float)
+        lon_2d, lat_2d = np.meshgrid(lon_1d, lat_1d)
+    else:
+        raise KeyError("ds1 must include LATIXY/LONGXY or lat/lon for A_index_core fallback.")
+
+    if lat_2d.ndim == 3:
+        lat_2d = lat_2d[0, :, :]
+        lon_2d = lon_2d[0, :, :]
+
+    if "LANDFRAC_PFT" in ds1.variables:
+        lf = np.asarray(ds1.variables["LANDFRAC_PFT"][:], dtype=float)
+        if lf.ndim == 3:
+            lf = lf.max(axis=0)
+        landmask = (np.isfinite(lf) & (lf > 0.0)).astype(np.int32)
+    else:
+        landmask = (np.isfinite(lat_2d) & np.isfinite(lon_2d)).astype(np.int32)
+
+    return lat_2d, lon_2d, landmask
+
+
 def build_index_core() -> None:
     print("[A_index_core] building...")
-    ds2 = nc.Dataset(config.FILE_PATHS["ds2"])
-    ds10 = nc.Dataset(config.FILE_PATHS["ds10"])
-    ds4 = nc.Dataset(config.FILE_PATHS["ds4"])
+    ds2_path = (config.FILE_PATHS.get("ds2") or "").strip()
+    ds10_path = (config.FILE_PATHS.get("ds10") or "").strip()
+    ds4_path = (config.FILE_PATHS.get("ds4") or "").strip()
+    ds1_path = (config.FILE_PATHS.get("ds1") or "").strip()
+
+    if not ds10_path or not os.path.exists(ds10_path):
+        raise FileNotFoundError("A_index_core requires a valid ds10 path.")
+
+    ds2 = None
+    ds4 = None
+    ds10 = nc.Dataset(ds10_path)
     try:
-        lats = ds2.variables["lat"][:]
-        lons = ds2.variables["lon"][:]
-        landmask = ds2.variables["landmask"][:]
-
-        lat_indices = np.where((lats >= config.LAT2) & (lats <= config.LAT1))[0]
-        lon_indices = np.where((lons >= config.LON1) & (lons <= config.LON2))[0]
-
+        use_ds1_fallback = (not ds2_path) or (not os.path.exists(ds2_path))
         cell_indices = None
+        grid_source_meta = None
 
-        # Support both structured 2D (lat, lon) and unstructured 1D meshes.
-        if landmask.ndim == 2:
-            filtered_coordinates = [(i, j) for i in lat_indices for j in lon_indices if landmask[i, j] == 1]
-            query_coords = np.array([(lats[i], lons[j]) for i, j in filtered_coordinates], dtype=float)
-        elif landmask.ndim == 1:
-            # Unstructured grid: lat/lon/landmask index the same gridcell axis.
-            if lats.ndim != 1 or lons.ndim != 1 or lats.shape[0] != lons.shape[0] or landmask.shape[0] != lats.shape[0]:
-                raise ValueError(
-                    "Unsupported 1D mesh definition: expected lat/lon/landmask to be 1D and aligned."
-                )
-            cell_indices = np.where(
-                (lats >= config.LAT2)
-                & (lats <= config.LAT1)
-                & (lons >= config.LON1)
-                & (lons <= config.LON2)
-                & (landmask == 1)
-            )[0]
-            filtered_coordinates = [(int(idx), int(idx)) for idx in cell_indices]
-            query_coords = np.column_stack((lats[cell_indices], lons[cell_indices])).astype(float)
+        if use_ds1_fallback:
+            if not ds1_path or not os.path.exists(ds1_path):
+                raise FileNotFoundError("ds2 missing; ds1 fallback path is also missing.")
+            print("[A_index_core] ds2 missing; using ds1 fallback grid.")
+            ds1 = nc.Dataset(ds1_path)
+            try:
+                lats, lons, landmask = _get_grid_from_ds1(ds1)
+            finally:
+                ds1.close()
+
+            ny, nx = landmask.shape
+            filtered_coordinates = [
+                (i, j)
+                for i in range(ny)
+                for j in range(nx)
+                if landmask[i, j] == 1
+                and config.LAT2 <= float(lats[i, j]) <= config.LAT1
+                and config.LON1 <= float(lons[i, j]) <= config.LON2
+            ]
+            query_coords = np.array([(float(lats[i, j]), float(lons[i, j])) for i, j in filtered_coordinates], dtype=float)
+            landmask_ndim = 2
+            grid_source_meta = source_meta(ds1_path)
         else:
-            raise ValueError(f"Unsupported landmask shape: {landmask.shape}")
+            ds2 = nc.Dataset(ds2_path)
+            lats = ds2.variables["lat"][:]
+            lons = ds2.variables["lon"][:]
+            landmask = ds2.variables["landmask"][:]
+
+            lat_indices = np.where((lats >= config.LAT2) & (lats <= config.LAT1))[0]
+            lon_indices = np.where((lons >= config.LON1) & (lons <= config.LON2))[0]
+
+            # Support both structured 2D (lat, lon) and unstructured 1D meshes.
+            if landmask.ndim == 2:
+                filtered_coordinates = [(i, j) for i in lat_indices for j in lon_indices if landmask[i, j] == 1]
+                query_coords = np.array([(lats[i], lons[j]) for i, j in filtered_coordinates], dtype=float)
+            elif landmask.ndim == 1:
+                # Unstructured grid: lat/lon/landmask index the same gridcell axis.
+                if lats.ndim != 1 or lons.ndim != 1 or lats.shape[0] != lons.shape[0] or landmask.shape[0] != lats.shape[0]:
+                    raise ValueError(
+                        "Unsupported 1D mesh definition: expected lat/lon/landmask to be 1D and aligned."
+                    )
+                cell_indices = np.where(
+                    (lats >= config.LAT2)
+                    & (lats <= config.LAT1)
+                    & (lons >= config.LON1)
+                    & (lons <= config.LON2)
+                    & (landmask == 1)
+                )[0]
+                filtered_coordinates = [(int(idx), int(idx)) for idx in cell_indices]
+                query_coords = np.column_stack((lats[cell_indices], lons[cell_indices])).astype(float)
+            else:
+                raise ValueError(
+                    f"Unsupported landmask shape: {landmask.shape}"
+                )
+            landmask_ndim = int(landmask.ndim)
+            grid_source_meta = source_meta(ds2_path)
 
         print(f"[A_index_core] selected cells after filtering: {len(filtered_coordinates)}")
 
+        restart_tree = cKDTree(np.vstack((ds10.variables["grid1d_lat"][:], ds10.variables["grid1d_lon"][:])).T)
+        _, restart_indices = restart_tree.query(query_coords, k=1)
+
         if config.FORCING_MODE == "datm":
-            if landmask.ndim == 1 and cell_indices is not None:
+            if (not ds4_path) or (not os.path.exists(ds4_path)):
+                raise FileNotFoundError(
+                    "DATM mode requires preprocessed forcing file ds4 for A_index_core. "
+                    "Please run with --prepare-forcing (or --prepare-forcing --force-rebuild-forcing) first."
+                )
+            else:
+                ds4 = nc.Dataset(ds4_path)
+            if ds4 is not None and landmask_ndim == 1 and cell_indices is not None:
                 print("[A_index_core] DATM mode: using direct same-mesh index mapping (no KD-tree).")
                 restart_coords = np.vstack((ds10.variables["grid1d_lat"][:], ds10.variables["grid1d_lon"][:])).T
                 forcing_coords = _read_forcing_coords_2d(ds4)
@@ -244,13 +427,20 @@ def build_index_core() -> None:
 
                 restart_indices = sel.copy()
                 forcing_indices = sel.copy()
-            else:
+            elif ds4 is not None:
                 print("[A_index_core] DATM mode: using direct same-mesh coordinate mapping (no KD-tree).")
-                restart_indices, forcing_indices = _direct_same_mesh_indices(query_coords, ds10, ds4, decimals=6)
+                try:
+                    restart_indices, forcing_indices = _direct_same_mesh_indices(query_coords, ds10, ds4, decimals=6)
+                except Exception as exc:
+                    print(
+                        "[A_index_core] warning: same-mesh coordinate mapping failed; "
+                        f"fallback to forcing KDTree nearest-neighbor mapping. details: {exc}"
+                    )
+                    forcing_indices = _nearest_forcing_indices_by_kdtree(query_coords, ds4)
         else:
-            restart_tree = cKDTree(np.vstack((ds10.variables["grid1d_lat"][:], ds10.variables["grid1d_lon"][:])).T)
-            _, restart_indices = restart_tree.query(query_coords, k=1)
-
+            if not ds4_path or not os.path.exists(ds4_path):
+                raise FileNotFoundError("Legacy forcing mode requires a valid ds4 path for A_index_core.")
+            ds4 = nc.Dataset(ds4_path)
             forcing_coords = _read_forcing_coords_2d(ds4)
             forcing_tree = cKDTree(forcing_coords)
             _, forcing_indices = forcing_tree.query(query_coords, k=1)
@@ -263,8 +453,8 @@ def build_index_core() -> None:
                     "batch_id": (row_id // config.BATCH_SIZE) + 1,
                     "lat_idx": int(i),
                     "lon_idx": int(j),
-                    "Latitude": float(lats[i]),
-                    "Longitude": float(lons[j]),
+                    "Latitude": float(lats[i] if np.ndim(lats) == 1 else lats[i, j]),
+                    "Longitude": float(lons[j] if np.ndim(lons) == 1 else lons[i, j]),
                     "nearest_restart_index": int(restart_indices[row_id]),
                     "nearest_forcing_index": int(forcing_indices[row_id]),
                     "gridcell_id": int(restart_indices[row_id]) + 1,
@@ -274,26 +464,30 @@ def build_index_core() -> None:
         out_dir = module_dir("A_index_core")
         index_df.to_pickle(os.path.join(out_dir, "index_master.pkl"))
 
-        for batch_id, batch_df in index_df.groupby("batch_id", sort=True):
+        batch_groups = list(index_df.groupby("batch_id", sort=True))
+        total_batches = len(batch_groups)
+        for batch_pos, (batch_id, batch_df) in enumerate(batch_groups, start=1):
             batch_df.to_pickle(os.path.join(out_dir, f"batch_{int(batch_id):02d}.pkl"))
+            _log_batch_progress("A_index_core", batch_pos, total_batches, int(batch_id), every=20)
 
         save_manifest(
             "A_index_core",
             {
                 "module": "A_index_core",
-                "sources": [
-                    source_meta(config.FILE_PATHS["ds2"]),
-                    source_meta(config.FILE_PATHS["ds10"]),
-                    source_meta(config.FILE_PATHS["ds4"]),
-                ],
+                "sources": [grid_source_meta, source_meta(ds10_path)]
+                + (
+                    [source_meta(ds4_path)] if ds4 is not None else [{"forcing_index": "from_restart", "mode": config.FORCING_MODE}]
+                ),
                 "rows": int(index_df.shape[0]),
                 "batches": int(index_df["batch_id"].max()),
             },
         )
     finally:
-        ds2.close()
+        if ds2 is not None:
+            ds2.close()
         ds10.close()
-        ds4.close()
+        if ds4 is not None:
+            ds4.close()
     print("[A_index_core] done.")
 
 
@@ -303,24 +497,29 @@ def build_ds1_surface() -> None:
     ds1 = nc.Dataset(config.FILE_PATHS["ds1"])
     try:
         out_dir = module_dir("A_ds1_surface")
-        for batch_id, batch_df in index_df.groupby("batch_id", sort=True):
+        batch_groups = list(index_df.groupby("batch_id", sort=True))
+        total_batches = len(batch_groups)
+        for batch_pos, (batch_id, batch_df) in enumerate(batch_groups, start=1):
+            _log_batch_progress("A_ds1_surface", batch_pos, total_batches, int(batch_id))
             rows = {"__row_id": batch_df["__row_id"].tolist()}
+            lat_idx = batch_df["lat_idx"].to_numpy(dtype=np.int64)
+            lon_idx = batch_df["lon_idx"].to_numpy(dtype=np.int64)
             for var in config.STATIC_SURFACE_VARS_2D:
                 arr = ds1.variables[var]
                 if arr.ndim == 1:
-                    rows[var] = [float(arr[i]) for i in batch_df["lat_idx"]]
+                    rows[var] = np.asarray(arr[lat_idx], dtype=float).tolist()
                 elif arr.ndim == 2:
-                    rows[var] = [float(arr[i, j]) for i, j in zip(batch_df["lat_idx"], batch_df["lon_idx"])]
+                    rows[var] = [float(arr[i, j]) for i, j in zip(lat_idx, lon_idx)]
                 else:
                     raise ValueError(f"Unsupported surface var shape for {var}: {arr.shape}")
             for var in config.STATIC_SURFACE_VARS_3D:
                 arr = ds1.variables[var]
                 if arr.ndim == 2:
-                    rows[var] = [np.asarray(arr[:, i], dtype=float).tolist() for i in batch_df["lat_idx"]]
+                    rows[var] = np.asarray(arr[:, lat_idx], dtype=float).T.tolist()
                 elif arr.ndim == 3:
                     rows[var] = [
                         np.asarray(arr[:, i, j], dtype=float).tolist()
-                        for i, j in zip(batch_df["lat_idx"], batch_df["lon_idx"])
+                        for i, j in zip(lat_idx, lon_idx)
                     ]
                 else:
                     raise ValueError(f"Unsupported layered surface var shape for {var}: {arr.shape}")
@@ -333,31 +532,40 @@ def build_ds1_surface() -> None:
 
 
 def build_ds2_history_x() -> None:
+    ds2_path = (config.FILE_PATHS.get("ds2") or "").strip()
+    if not ds2_path or not os.path.exists(ds2_path):
+        print("[A_ds2_history_x] skipped (ds2 missing in config or file not found).")
+        return
     print("[A_ds2_history_x] building...")
     index_df = load_index_master()
-    ds2 = nc.Dataset(config.FILE_PATHS["ds2"])
+    ds2 = nc.Dataset(ds2_path)
     try:
         out_dir = module_dir("A_ds2_history_x")
-        for batch_id, batch_df in index_df.groupby("batch_id", sort=True):
+        batch_groups = list(index_df.groupby("batch_id", sort=True))
+        total_batches = len(batch_groups)
+        for batch_pos, (batch_id, batch_df) in enumerate(batch_groups, start=1):
+            _log_batch_progress("A_ds2_history_x", batch_pos, total_batches, int(batch_id))
             rows = {"__row_id": batch_df["__row_id"].tolist()}
+            lat_idx = batch_df["lat_idx"].to_numpy(dtype=np.int64)
+            lon_idx = batch_df["lon_idx"].to_numpy(dtype=np.int64)
             landfrac = ds2.variables["landfrac"]
             if landfrac.ndim == 1:
-                rows["landfrac"] = [float(landfrac[i]) for i in batch_df["lat_idx"]]
+                rows["landfrac"] = np.asarray(landfrac[lat_idx], dtype=float).tolist()
             elif landfrac.ndim == 2:
-                rows["landfrac"] = [float(landfrac[i, j]) for i, j in zip(batch_df["lat_idx"], batch_df["lon_idx"])]
+                rows["landfrac"] = [float(landfrac[i, j]) for i, j in zip(lat_idx, lon_idx)]
             else:
                 raise ValueError(f"Unsupported landfrac shape: {landfrac.shape}")
             for var in config.HISTORY_GRID_VARS_2D:
                 arr = ds2.variables[var]
                 if arr.ndim == 2:
-                    rows[var] = [float(arr[0, i]) for i in batch_df["lat_idx"]]
+                    rows[var] = np.asarray(arr[0, lat_idx], dtype=float).tolist()
                 elif arr.ndim == 3:
-                    rows[var] = [float(arr[0, i, j]) for i, j in zip(batch_df["lat_idx"], batch_df["lon_idx"])]
+                    rows[var] = [float(arr[0, i, j]) for i, j in zip(lat_idx, lon_idx)]
                 else:
                     raise ValueError(f"Unsupported history var shape for {var}: {arr.shape}")
             pd.DataFrame(rows).to_pickle(os.path.join(out_dir, f"batch_{int(batch_id):02d}.pkl"))
 
-        save_manifest("A_ds2_history_x", {"module": "A_ds2_history_x", "sources": [source_meta(config.FILE_PATHS["ds2"])]})
+        save_manifest("A_ds2_history_x", {"module": "A_ds2_history_x", "sources": [source_meta(ds2_path)]})
     finally:
         ds2.close()
     print("[A_ds2_history_x] done.")
@@ -366,27 +574,42 @@ def build_ds2_history_x() -> None:
 def build_h0_list_y() -> None:
     print("[A_h0_list_y] building...")
     index_df = load_index_master()
-    h0_paths = config.FILE_PATHS["h0_list"]
-    if not h0_paths:
-        raise ValueError("FILE_PATHS['h0_list'] is empty. Please provide one h0 file path.")
-    ds_h0 = nc.Dataset(h0_paths[0])
+    h0_paths = config.FILE_PATHS.get("h0_list", [])
+    source_path = h0_paths[0] if (h0_paths and h0_paths[0]) else ""
+    if (not source_path) or (not os.path.exists(source_path)):
+        print("[A_h0_list_y] skipped (h0_list missing in config or file not found).")
+        return
+
+    ds_h0 = nc.Dataset(source_path)
     try:
         out_dir = module_dir("A_h0_list_y")
-        for batch_id, batch_df in index_df.groupby("batch_id", sort=True):
+        batch_groups = list(index_df.groupby("batch_id", sort=True))
+        total_batches = len(batch_groups)
+        for batch_pos, (batch_id, batch_df) in enumerate(batch_groups, start=1):
+            _log_batch_progress("A_h0_list_y", batch_pos, total_batches, int(batch_id))
             rows = {"__row_id": batch_df["__row_id"].tolist()}
+            lat_idx = batch_df["lat_idx"].to_numpy(dtype=np.int64)
+            lon_idx = batch_df["lon_idx"].to_numpy(dtype=np.int64)
             for var in config.HISTORY_GRID_VARS_2D:
+                if var not in ds_h0.variables:
+                    # Fallback files (e.g., ds1 surfdata) may not contain history vars.
+                    rows[f"Y_{var}"] = [float("nan")] * len(batch_df)
+                    continue
                 arr = ds_h0.variables[var]
                 if arr.ndim == 2:
-                    rows[f"Y_{var}"] = [float(arr[0, i]) for i in batch_df["lat_idx"]]
+                    rows[f"Y_{var}"] = np.asarray(arr[0, lat_idx], dtype=float).tolist()
                 elif arr.ndim == 3:
-                    rows[f"Y_{var}"] = [float(arr[0, i, j]) for i, j in zip(batch_df["lat_idx"], batch_df["lon_idx"])]
+                    rows[f"Y_{var}"] = [float(arr[0, i, j]) for i, j in zip(lat_idx, lon_idx)]
                 else:
                     raise ValueError(f"Unsupported target history var shape for {var}: {arr.shape}")
             pd.DataFrame(rows).to_pickle(os.path.join(out_dir, f"batch_{int(batch_id):02d}.pkl"))
 
         save_manifest(
             "A_h0_list_y",
-            {"module": "A_h0_list_y", "sources": [source_meta(h0_paths[0])]},
+            {
+                "module": "A_h0_list_y",
+                "sources": [source_meta(source_path)],
+            },
         )
     finally:
         ds_h0.close()
@@ -410,6 +633,8 @@ def _resolve_datm_files(var_name: str) -> List[str]:
     if not token:
         raise ValueError(f"No DATM token configured for forcing variable: {var_name}")
 
+    latest_years = int(getattr(config, "DATM_LATEST_YEARS", 20) or 0)
+
     pattern = re.compile(rf"(?:.*_)?cl[i]?mforc\..*\.{re.escape(token)}\.(\d{{4}})-(\d{{2}})\.nc$")
     files_by_month: Dict[tuple, List[str]] = {}
     for root, _, names in os.walk(datm_root, followlinks=True):
@@ -425,19 +650,91 @@ def _resolve_datm_files(var_name: str) -> List[str]:
             files_by_month.setdefault(key, []).append(os.path.join(root, name))
 
     files: List[str] = []
-    for year in range(config.DATM_START_YEAR, config.DATM_END_YEAR + 1):
-        for month in range(1, 13):
-            key = (year, month)
-            candidates = sorted(files_by_month.get(key, []))
-            if not candidates:
-                print(f"[ForcingPrep] warning: missing DATM file for {var_name} {year}-{month:02d}")
-                continue
-            if len(candidates) > 1:
-                print(f"[ForcingPrep] warning: multiple DATM files for {var_name} {year}-{month:02d}; using {candidates[0]}")
-            files.append(candidates[0])
+    if files_by_month:
+        if latest_years > 0:
+            available_years = sorted({year for year, _ in files_by_month.keys()})
+            if available_years:
+                max_year = max(available_years)
+                min_keep = max_year - latest_years + 1
+                files_by_month = {
+                    (year, month): paths
+                    for (year, month), paths in files_by_month.items()
+                    if year >= min_keep
+                }
+                print(
+                    f"[ForcingPrep] apply DATM_LATEST_YEARS={latest_years} for {var_name}: "
+                    f"keep years {min_keep}-{max_year}"
+                )
+        for year in range(config.DATM_START_YEAR, config.DATM_END_YEAR + 1):
+            for month in range(1, 13):
+                key = (year, month)
+                candidates = sorted(files_by_month.get(key, []))
+                if not candidates:
+                    print(f"[ForcingPrep] warning: missing DATM file for {var_name} {year}-{month:02d}")
+                    continue
+                if len(candidates) > 1:
+                    print(f"[ForcingPrep] warning: multiple DATM files for {var_name} {year}-{month:02d}; using {candidates[0]}")
+                files.append(candidates[0])
 
-    if not files:
+    if files:
+        print(
+            f"[ForcingPrep] resolved {len(files)} DATM monthly files for {var_name} "
+            f"({config.DATM_START_YEAR}-{config.DATM_END_YEAR})"
+        )
+        return files
+
+    # Fallback: 3-hourly cpl.ha2x3h files (one or multiple files per month/day).
+    # We do not require token in filename here because all forcing vars live in
+    # the same file family and are selected by variable mapping when read.
+    ha2x3h_pattern = re.compile(r"\.(\d{4})-(\d{2})-(\d{2})(?:-\d+)?\.nc$")
+    dated_files_all = []
+    dated_files_in_range = []
+    for root, _, names in os.walk(datm_root, followlinks=True):
+        for name in names:
+            if not (name.endswith(".nc") and "ha2x3h" in name.lower()):
+                continue
+            match = ha2x3h_pattern.search(name)
+            if not match:
+                continue
+            year = int(match.group(1))
+            month = int(match.group(2))
+            day = int(match.group(3))
+            record = (year, month, day, os.path.join(root, name))
+            dated_files_all.append(record)
+            if config.DATM_START_YEAR <= year <= config.DATM_END_YEAR:
+                dated_files_in_range.append(record)
+
+    if not dated_files_all:
         raise FileNotFoundError(f"No DATM files found for {var_name} in {datm_root}")
+
+    dated_files = dated_files_in_range
+    if not dated_files:
+        # Some datasets encode simulation years (e.g. 0351..0379), which do not
+        # overlap calendar-year ranges in config. In this case, use all files.
+        dated_files = dated_files_all
+        min_y = min(x[0] for x in dated_files_all)
+        max_y = max(x[0] for x in dated_files_all)
+        print(
+            f"[ForcingPrep] warning: no ha2x3h files for {var_name} in configured year range "
+            f"{config.DATM_START_YEAR}-{config.DATM_END_YEAR}; fallback to all available "
+            f"simulation years {min_y}-{max_y}."
+        )
+
+    if latest_years > 0:
+        max_year = max(x[0] for x in dated_files)
+        min_keep = max_year - latest_years + 1
+        dated_files = [rec for rec in dated_files if rec[0] >= min_keep]
+        print(
+            f"[ForcingPrep] apply DATM_LATEST_YEARS={latest_years} for {var_name}: "
+            f"keep simulation years {min_keep}-{max_year}"
+        )
+
+    dated_files.sort(key=lambda x: (x[0], x[1], x[2], x[3]))
+    files = [path for _, _, _, path in dated_files]
+    print(
+        f"[ForcingPrep] fallback to ha2x3h files for {var_name}: {len(files)} files "
+        f"({config.DATM_START_YEAR}-{config.DATM_END_YEAR})"
+    )
     return files
 
 
@@ -452,10 +749,14 @@ def _preprocessed_forcing_path(var_name: str) -> str:
 
 
 def _flatten_spatial_coords(ds: "xr.Dataset"):
-    lat_name = "LATIXY" if "LATIXY" in ds else ("lat" if "lat" in ds else None)
-    lon_name = "LONGXY" if "LONGXY" in ds else ("lon" if "lon" in ds else None)
+    lat_name = None
+    lon_name = None
+    for la, lo in [("LATIXY", "LONGXY"), ("lat", "lon"), ("doma_lat", "doma_lon")]:
+        if la in ds and lo in ds:
+            lat_name, lon_name = la, lo
+            break
     if lat_name is None or lon_name is None:
-        raise KeyError("DATM forcing dataset must include LATIXY/LONGXY or lat/lon.")
+        raise KeyError("DATM forcing dataset must include LATIXY/LONGXY, lat/lon, or doma_lat/doma_lon.")
 
     lat_data = np.asarray(ds[lat_name].values, dtype=float)
     lon_data = np.asarray(ds[lon_name].values, dtype=float)
@@ -477,25 +778,70 @@ def _monthly_mean_series_from_datm_files(var_name: str, datm_files: List[str]):
     if xr is None:
         raise ImportError("xarray is required to preprocess DATM forcing files.")
 
-    monthly_values = []
+    monthly_sum: Dict[tuple, np.ndarray] = {}
+    monthly_count: Dict[tuple, int] = {}
     lat_flat = None
     lon_flat = None
+    month_pattern = re.compile(r"\.(\d{4})-(\d{2})(?:-(\d{2})(?:-\d+)?)?\.nc$")
 
-    for fp in datm_files:
+    actual_expr = getattr(config, "DATM_3HLY_VAR_MAP", {}).get(var_name) if hasattr(config, "DATM_3HLY_VAR_MAP") else None
+    if not actual_expr:
+        actual_expr = DATM_3HLY_VAR_MAP.get(var_name, var_name)
+    component_names = [s.strip() for s in actual_expr.split("+")] if "+" in actual_expr else [actual_expr]
+
+    n_files = len(datm_files)
+    print(f"[ForcingPrep] {var_name}: reading {n_files} DATM files for monthly mean...")
+    for file_idx, fp in enumerate(datm_files, start=1):
+        m = month_pattern.search(os.path.basename(fp))
+        if not m:
+            raise ValueError(f"Cannot parse year-month from DATM filename: {fp}")
+        year = int(m.group(1))
+        month = int(m.group(2))
+        ym = (year, month)
+
         with xr.open_dataset(fp, decode_times=False) as ds:
-            if var_name not in ds:
-                raise KeyError(f"Variable {var_name} not found in DATM file: {fp}")
             if lat_flat is None or lon_flat is None:
                 lat_flat, lon_flat = _flatten_spatial_coords(ds)
 
-            da = ds[var_name]
-            if "time" not in da.dims:
-                raise ValueError(f"{var_name} has no time dimension in file: {fp}")
-            mean_da = da.mean(dim="time", skipna=True)
-            monthly_values.append(np.asarray(mean_da.values, dtype=float).reshape(-1))
+            missing = [name for name in component_names if name not in ds]
+            if missing:
+                # Fallback to canonical name for clmforc-style files.
+                if len(component_names) == 1 and var_name in ds:
+                    da = ds[var_name]
+                else:
+                    raise KeyError(f"Variable(s) {missing} not found in DATM file: {fp}")
+            else:
+                da = sum(ds[name] for name in component_names) if len(component_names) > 1 else ds[component_names[0]]
 
-    if not monthly_values:
+            if "time" not in da.dims:
+                raise ValueError(f"{var_name} ({actual_expr}) has no time dimension in file: {fp}")
+            mean_da = da.mean(dim="time", skipna=True)
+            vec = np.asarray(mean_da.values, dtype=float).reshape(-1)
+            if ym in monthly_sum:
+                if monthly_sum[ym].shape[0] != vec.shape[0]:
+                    raise ValueError(
+                        f"Spatial size mismatch within month {year}-{month:02d}: "
+                        f"{monthly_sum[ym].shape[0]} vs {vec.shape[0]}"
+                    )
+                monthly_sum[ym] += vec
+                monthly_count[ym] += 1
+            else:
+                monthly_sum[ym] = vec.copy()
+                monthly_count[ym] = 1
+        if file_idx == 1 or file_idx % 100 == 0 or file_idx == n_files:
+            print(f"[ForcingPrep] {var_name}: processed {file_idx}/{n_files} files")
+
+    if not monthly_sum:
         raise ValueError(f"No monthly DATM files collected for {var_name}")
+
+    monthly_values = []
+    ordered_months = sorted(monthly_sum.keys())
+    for ym in ordered_months:
+        monthly_values.append(monthly_sum[ym] / float(monthly_count[ym]))
+    print(
+        f"[ForcingPrep] {var_name}: aggregated {len(ordered_months)} monthly means "
+        f"from {n_files} files"
+    )
 
     series = np.stack(monthly_values, axis=0)  # (n_months, n_grid)
     if lat_flat is None or lon_flat is None:
@@ -550,6 +896,7 @@ def prepare_forcing_inputs_from_datm(force_rebuild: bool = False, required_vars:
     os.makedirs(out_dir, exist_ok=True)
 
     for var_name, ds_key in var_to_ds_key.items():
+        t0 = time.time()
         target_path = _preprocessed_forcing_path(var_name)
 
         if not force_rebuild and os.path.exists(target_path):
@@ -607,7 +954,7 @@ def prepare_forcing_inputs_from_datm(force_rebuild: bool = False, required_vars:
         ds_out.to_netcdf(target_path, encoding=encoding)
 
         config.FILE_PATHS[ds_key] = target_path
-        print(f"[ForcingPrep] done {var_name}")
+        print(f"[ForcingPrep] done {var_name} (elapsed {time.time() - t0:.1f}s)")
 
 
 def _build_datm_spatial_mapping(ds: "xr.Dataset", index_df: pd.DataFrame):
@@ -689,19 +1036,44 @@ def build_forcing_module(module_name: str, ds_key: str, var_name: str) -> None:
                 # Fallback: assume non-time axis is the grid axis.
                 grid_axis = 1 if dims and dims[0] == "time" else 0
 
+            # Zhuowei-style forcing mapping: build forcing index from forcing
+            # coordinates directly instead of reusing restart-based indices.
+            try:
+                mapped_forcing_indices = _build_forcing_index_mapping(index_df, ds)
+                mapped_forcing_indices = np.asarray(mapped_forcing_indices, dtype=np.int64)
+                forcing_index_source = "forcing_kdtree"
+            except Exception as exc:
+                # Keep a compatibility fallback for files lacking coordinate vars.
+                print(
+                    f"[ForcingMap] warning: failed forcing-coordinate mapping ({exc}); "
+                    "fallback to index_master nearest_forcing_index."
+                )
+                mapped_forcing_indices = index_df["nearest_forcing_index"].to_numpy(dtype=np.int64)
+                forcing_index_source = "index_master_fallback"
+
+            index_work = index_df.copy()
+            index_work["_forcing_idx"] = mapped_forcing_indices
+
             batch_ids = sorted(index_df["batch_id"].unique())
-            for batch_id, batch_df in index_df.groupby("batch_id", sort=True):
+            print(
+                f"[{module_name}] extraction plan: batches={len(batch_ids)}, "
+                f"samples={len(index_df)}, grid_axis={grid_axis}, index_source={forcing_index_source}"
+            )
+            for batch_id, batch_df in index_work.groupby("batch_id", sort=True):
                 print(f"[{module_name}] Processing batch {batch_id}/{batch_ids[-1]}...")
-                rows = {"__row_id": batch_df["__row_id"].tolist(), var_name: []}
-                for idx in batch_df["nearest_forcing_index"]:
-                    idx = int(idx)
-                    if grid_axis == 1:
-                        series = np.asarray(arr[:, idx], dtype=float).tolist()
-                    else:
-                        series = np.asarray(arr[idx, :], dtype=float).tolist()
-                    rows[var_name].append(series)
+                idx_arr = batch_df["_forcing_idx"].to_numpy(dtype=np.int64)
+                if grid_axis == 1:
+                    # Gather all selected gridcells in one operation: (time, n) -> (n, time)
+                    data_2d = np.asarray(arr[:, idx_arr], dtype=float).T
+                else:
+                    data_2d = np.asarray(arr[idx_arr, :], dtype=float)
+                rows = {
+                    "__row_id": batch_df["__row_id"].tolist(),
+                    var_name: data_2d.tolist(),
+                }
                 pd.DataFrame(rows).to_pickle(os.path.join(out_dir, f"batch_{int(batch_id):02d}.pkl"))
                 print(f"[{module_name}] Saved batch {batch_id}")
+            print(f"[{module_name}] completed {len(batch_ids)} batches")
         finally:
             ds.close()
     else:
@@ -750,7 +1122,10 @@ def build_ds10_restart_x() -> None:
         all_vars = config.RESTART_PFT_VARS + config.RESTART_COL_1D_VARS + config.RESTART_COL_2D_VARS
         x_values = {var: ds10.variables[var][:] for var in all_vars}
 
-        for batch_id, batch_df in index_df.groupby("batch_id", sort=True):
+        batch_groups = list(index_df.groupby("batch_id", sort=True))
+        total_batches = len(batch_groups)
+        for batch_pos, (batch_id, batch_df) in enumerate(batch_groups, start=1):
+            _log_batch_progress("A_ds10_restart_x", batch_pos, total_batches, int(batch_id))
             rows: Dict[str, List] = {"__row_id": batch_df["__row_id"].tolist()}
             for var in all_vars:
                 rows[var] = []
@@ -790,7 +1165,10 @@ def build_r_list_y() -> None:
         all_vars = config.RESTART_PFT_VARS + config.RESTART_COL_1D_VARS + config.RESTART_COL_2D_VARS
         y_values = {var: ds_r.variables[var][:] for var in all_vars}
 
-        for batch_id, batch_df in index_df.groupby("batch_id", sort=True):
+        batch_groups = list(index_df.groupby("batch_id", sort=True))
+        total_batches = len(batch_groups)
+        for batch_pos, (batch_id, batch_df) in enumerate(batch_groups, start=1):
+            _log_batch_progress("A_r_list_y", batch_pos, total_batches, int(batch_id))
             rows: Dict[str, List] = {"__row_id": batch_df["__row_id"].tolist()}
             for var in all_vars:
                 rows[f"Y_{var}"] = []
@@ -837,7 +1215,10 @@ def build_clm_params_pft() -> None:
                     broadcast_feature_dict[var] = np.asarray(vals, dtype=float).tolist()
 
         out_dir = module_dir("A_clm_params_pft")
-        for batch_id, batch_df in index_df.groupby("batch_id", sort=True):
+        batch_groups = list(index_df.groupby("batch_id", sort=True))
+        total_batches = len(batch_groups)
+        for batch_pos, (batch_id, batch_df) in enumerate(batch_groups, start=1):
+            _log_batch_progress("A_clm_params_pft", batch_pos, total_batches, int(batch_id))
             rows = {"__row_id": batch_df["__row_id"].tolist()}
             for var, val_list in broadcast_feature_dict.items():
                 rows[f"pft_{var}"] = [val_list] * len(batch_df)
@@ -997,28 +1378,31 @@ def assemble_final_dataset() -> None:
 
 
 def build_module(module_name: str) -> None:
+    label = f"build {module_name}"
     if module_name == "A_index_core":
-        build_index_core()
+        _run_with_timing(label, build_index_core)
     elif module_name == "A_ds1_surface":
-        build_ds1_surface()
+        _run_with_timing(label, build_ds1_surface)
     elif module_name == "A_ds2_history_x":
-        build_ds2_history_x()
+        _run_with_timing(label, build_ds2_history_x)
     elif module_name == "A_ds10_restart_x":
-        build_ds10_restart_x()
+        _run_with_timing(label, build_ds10_restart_x)
     elif module_name == "A_h0_list_y":
-        build_h0_list_y()
+        _run_with_timing(label, build_h0_list_y)
     elif module_name == "A_r_list_y":
-        build_r_list_y()
+        _run_with_timing(label, build_r_list_y)
     elif module_name == "A_clm_params_pft":
-        build_clm_params_pft()
+        _run_with_timing(label, build_clm_params_pft)
     elif module_name in config.FORCING_MODULE_MAP:
         ds_key, var_name = config.FORCING_MODULE_MAP[module_name]
-        build_forcing_module(module_name, ds_key, var_name)
+        _run_with_timing(label, build_forcing_module, module_name, ds_key, var_name)
     else:
         raise ValueError(f"Unknown module: {module_name}")
 
 
 def run_extraction(to_build: List[str]) -> None:
+    t0 = time.time()
+    print(f"[Extraction] start modules={to_build}")
     modules = to_build
     if "all" in modules:
         modules = config.ALL_MODULES.copy()
@@ -1031,7 +1415,12 @@ def run_extraction(to_build: List[str]) -> None:
             if module_name in config.FORCING_MODULE_MAP:
                 _, var_name = config.FORCING_MODULE_MAP[module_name]
                 required_vars.append(var_name)
-        prepare_forcing_inputs_from_datm(force_rebuild=False, required_vars=required_vars if required_vars else None)
+        _run_with_timing(
+            "prepare DATM forcing inputs",
+            prepare_forcing_inputs_from_datm,
+            force_rebuild=False,
+            required_vars=required_vars if required_vars else None,
+        )
     
     if modules:
         if "A_index_core" not in modules:
@@ -1039,10 +1428,11 @@ def run_extraction(to_build: List[str]) -> None:
                 modules = ["A_index_core"] + modules
         for module_name in modules:
             build_module(module_name)
+    print(f"[Extraction] done (elapsed {_format_elapsed(time.time() - t0)})")
 
 
 def run_assembly() -> None:
-    assemble_final_dataset()
+    _run_with_timing("assemble final dataset", assemble_final_dataset)
 
 
 def parse_args() -> argparse.Namespace:
@@ -1089,6 +1479,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    t0 = time.time()
     args = parse_args()
     if args.config_input:
         config.load_config(args.config_input)
@@ -1098,7 +1489,11 @@ def main() -> None:
         config.FORCING_MODE = args.forcing_mode
 
     if args.prepare_forcing or args.prepare_forcing_only:
-        prepare_forcing_inputs_from_datm(force_rebuild=args.force_rebuild_forcing)
+        _run_with_timing(
+            "prepare DATM forcing inputs",
+            prepare_forcing_inputs_from_datm,
+            force_rebuild=args.force_rebuild_forcing,
+        )
 
     if args.prepare_forcing_only:
         return
@@ -1112,6 +1507,7 @@ def main() -> None:
 
     if not to_build and not args.assemble:
         print("No action. Use --build all --assemble, or --build <module>, or --assemble.")
+    print(f"[Main] done (elapsed {_format_elapsed(time.time() - t0)})")
 
 
 if __name__ == "__main__":

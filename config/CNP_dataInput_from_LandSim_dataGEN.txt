@@ -1,0 +1,93 @@
+# =============================================================================
+# LandSim_dataGEN_Brench1 test config (paths mapped from LandSim_dataGEN)
+# =============================================================================
+
+DATA_ROOT: /global/cfs/cdirs/m4814/daweigao/14_Code/0_dataset_construction/9_0_25_degree/025E3SMV3
+BASE_OUTPUT_ROOT: /global/cfs/cdirs/m4814/daweigao/15_code_Landsim/LandSim_dataGEN_Brench1/LandSim_dataGEN/output2
+
+# Input files (copied from LandSim_dataGEN config)
+DS1_PATH: /global/cfs/cdirs/m4814/daweigao/14_Code/0_dataset_construction/9_0_25_degree/025E3SMV3/surfdata_0.25x0.25_simyr1850_c240125_TOP.nc
+DS2_PATH:
+DS10_PATH: /global/cfs/cdirs/m4814/daweigao/14_Code/0_dataset_construction/9_0_25_degree/025E3SMV3/20240214.lndr025_trigrid_top_bgc.IcoswISC30E3r5.chrysalis.adsp.elm.r.0021-01-01-00000.nc
+H0_LIST_PATHS:
+R_LIST_PATHS: /global/cfs/cdirs/m4814/daweigao/14_Code/0_dataset_construction/9_0_25_degree/025E3SMV3/20240223.lndr025_trigrid_top_bgc.IcoswISC30E3r5.chrysalis.fnsp.elm.r.0251-01-01-00000.nc
+CLM_PARAMS_PATH: /global/cfs/cdirs/m4814/daweigao/14_Code/0_dataset_construction/9_0_25_degree/025E3SMV3/clm_params_c211124.nc
+
+# Legacy forcing placeholders (empty in source config)
+DS4_PATH:
+DS5_PATH:
+DS6_PATH:
+DS7_PATH:
+DS8_PATH:
+DS9_PATH:
+
+FORCING_MODE: datm
+DATM_ROOT: /global/cfs/cdirs/m4814/daweigao/14_Code/0_dataset_construction/9_0_25_degree/025E3SMV3/3hrly_drives
+DATM_START_YEAR: 1901
+DATM_END_YEAR: 2023
+DATM_LATEST_YEARS: 20
+DATM_FLDS_TOKEN: TPQWL
+DATM_PSRF_TOKEN: TPQWL
+DATM_FSDS_TOKEN: Solr
+DATM_QBOT_TOKEN: TPQWL
+DATM_PRECTMMS_TOKEN: Prec
+DATM_TBOT_TOKEN: TPQWL
+DATM_FLDS_PATH:
+DATM_PSRF_PATH:
+DATM_FSDS_PATH:
+DATM_QBOT_PATH:
+DATM_PRECTMMS_PATH:
+DATM_TBOT_PATH:
+
+# Domain and batching
+LAT1: 90
+LAT2: -90
+LON1: -180
+LON2: 180
+BATCH_SIZE: 1000
+
+# Time-series shape
+TIME_SERIES_LENGTH: 179580
+STEPS_PER_DAY: 4
+YEARS_IN_DATA: 123
+
+TIME SERIES VARIABLES (Climate Forcing):
+• FLDS, PSRF, FSDS, QBOT, PRECTmms, TBOT
+
+SURFACE PROPERTIES:
+• LANDFRAC_PFT, PCT_NATVEG, AREA, SOIL_COLOR, SOIL_ORDER, OCCLUDED_P, SECONDARY_P, LABILE_P, APATITE_P
+• PCT_SAND, PCT_CLAY, PCT_NAT_PFT
+
+PFT PARAMETERS:
+• deadwdcn, frootcn, leafcn, lflitcn, livewdcn, c3psn, croot_stem, crop, dleaf
+• dsladlai, evergreen, fcur, flivewd, flnr, fr_fcel, fr_flab, fr_flig, froot_leaf
+• grperc, grpnow, leaf_long, lf_fcel, lf_flab, lf_flig, rholnir, rholvis, rhosnir, rhosvis
+• roota_par, rootb_par, rootprof_beta, season_decid, slatop, smpsc, smpso, stem_leaf, stress_decid
+• taulnir, taulvis, tausnir, tausvis, woody, xl, z0mr
+
+SCALAR VARIABLES:
+• GPP, HR, AR, NPP
+
+1D PFT VARIABLES:
+• totvegc, deadstemn, deadcrootn, deadstemp, deadcrootp
+• leafc, leafc_storage, frootc, frootc_storage
+• deadcrootc, deadstemc, tlai, leafn, leafn_storage, frootn, frootn_storage
+• leafp, leafp_storage, frootp, frootp_storage
+• livestemc, livestemc_storage, livestemn, livestemn_storage, livestemp, livestemp_storage
+• deadcrootc_storage, deadstemc_storage, livecrootc, livecrootc_storage
+• deadcrootn_storage, deadstemn_storage, livecrootn, livecrootn_storage
+• deadcrootp_storage, deadstemp_storage, livecrootp, livecrootp_storage
+• leafc_xfer, frootc_xfer, livestemc_xfer, deadstemc_xfer, livecrootc_xfer, deadcrootc_xfer, gresp_xfer
+• leafn_xfer, frootn_xfer, livestemn_xfer, deadstemn_xfer, livecrootn_xfer, deadcrootn_xfer
+• leafp_xfer, frootp_xfer, livestemp_xfer, deadstemp_xfer, livecrootp_xfer, deadcrootp_xfer
+• cpool, npool, ppool, xsmrpool
+
+2D VARIABLES (layered):
+• cwdn_vr, secondp_vr, cwdp_vr, soil3c_vr, soil4c_vr, cwdc_vr
+• soil1c_vr, soil1n_vr, soil1p_vr, soil2c_vr, soil2n_vr, soil2p_vr
+• soil3n_vr, soil3p_vr, soil4n_vr, soil4p_vr, litr1c_vr, litr2c_vr, litr3c_vr
+• litr1n_vr, litr2n_vr, litr3n_vr, litr1p_vr, litr2p_vr, litr3p_vr
+• sminn_vr, smin_no3_vr, smin_nh4_vr, labilep_vr, occlp_vr, primp_vr, solutionp_vr
+
+RESTART_COL_1D_VARS:
+# Optional. Keep empty unless needed.

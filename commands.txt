@@ -8,3 +8,10 @@ python3 scripts/run_pipeline.py --config-input config/CNP_dataInput_dw.txt --bui
   --build A_ds1_surface A_ds2_history_x A_ds10_restart_x A_h0_list_y A_r_list_y A_forcing_ds4_flds A_forcing_ds5_psrf A_forcing_ds6_fsds A_forcing_ds7_qbot A_forcing_ds8_prectmms A_forcing_ds9_tbot A_clm_params_pft
 
 python3 scripts/run_pipeline.py --config-input config/CNP_dataInput_dw.txt --build all --assemble 
+
+
+mkdir -p logs && PYTHONUNBUFFERED=1 python scripts/run_pipeline.py \
+  --config-input config/CNP_dataInput_from_LandSim_dataGEN.txt \
+  --prepare-forcing --force-rebuild-forcing \
+  --build all --assemble --forcing-mode datm \
+  2>&1 | tee "logs/run_20260322_164452_rerun_output2.log"

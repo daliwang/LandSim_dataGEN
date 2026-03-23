@@ -49,6 +49,9 @@ FORCING_MODE = "datm"
 DATM_ROOT = ""
 DATM_START_YEAR = 1901
 DATM_END_YEAR = 2023
+# Default behavior: when DATM files are discovered by scanning DATM_ROOT,
+# only keep the newest N years. Set to 0 to disable this filter.
+DATM_LATEST_YEARS = 20
 # Initialize with empty values for all forcing variables
 DATM_TOKEN_MAP = {
     "FLDS": "",
@@ -123,6 +126,7 @@ def _apply_cnp_data_input_overrides(config_path: str) -> None:
     global DATM_ROOT
     global DATM_START_YEAR
     global DATM_END_YEAR
+    global DATM_LATEST_YEARS
     global RESTART_PFT_VARS
     global RESTART_COL_2D_VARS
     global RESTART_COL_1D_VARS
@@ -182,6 +186,10 @@ def _apply_cnp_data_input_overrides(config_path: str) -> None:
     DATM_ROOT = scalars.get("DATM_ROOT", DATM_ROOT)
     DATM_START_YEAR = _to_int(scalars.get("DATM_START_YEAR", str(DATM_START_YEAR)), DATM_START_YEAR)
     DATM_END_YEAR = _to_int(scalars.get("DATM_END_YEAR", str(DATM_END_YEAR)), DATM_END_YEAR)
+    DATM_LATEST_YEARS = _to_int(
+        scalars.get("DATM_LATEST_YEARS", str(DATM_LATEST_YEARS)),
+        DATM_LATEST_YEARS,
+    )
 
     token_overrides = {
         "DATM_FLDS_TOKEN": "FLDS",
