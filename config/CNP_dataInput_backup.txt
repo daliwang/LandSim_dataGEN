@@ -6,14 +6,13 @@
 BASE_OUTPUT_ROOT: output
 
 # Input files
-DS1_PATH: /gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TrainingData/TESSFA_NORTH/ERA5_REF_SURF05/surf_h0_restart_pft/surfdata.TESSFA_DOMAIN1.4km.1d.NALCMS.c260218_yw.nc
-DS2_PATH: /gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TrainingData/TESSFA_NORTH/ERA5_REF_SURF05/surf_h0_restart_pft/uELM_NORTHERA5_ERA5REF_I1850uELMCNPRDCTCBC.elm.h0.0021-01-01-00000.nc
-DS10_PATH: /gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TrainingData/TESSFA_NORTH/ERA5_REF_SURF05/surf_h0_restart_pft/uELM_NORTHERA5_ERA5REF_I1850uELMCNPRDCTCBC.elm.r.0021-01-01-00000.nc
+DS1_PATH: /gpfs/wolf2/cades/cli185/proj-shared/xyk/trendy_2024_data/processed_data/landusedata/surfdata_0.9x1.25_hist_1700_17pfts_c240731.nc
+DS2_PATH: /gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TrainingData/Trendy_1_data_CNP/NewRunFromDan12102025/20251201_TRENDY2024_default_ICB1850CNRDCTCBC_ad_spinup.elm.h0.0021-01-01-00000.nc
+DS10_PATH: /gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TrainingData/Trendy_1_data_CNP/NewRunFromDan12102025/20251201_TRENDY2024_default_ICB1850CNRDCTCBC_ad_spinup.elm.r.0021-01-01-00000.nc
 H0_LIST_PATHS: /gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TrainingData/Trendy_1_data_CNP/NewRunFromDan12102025/20251201_TRENDY2024_default_ICB1850CNPRDCTCBC.elm.h0.0801-01-01-00000.nc
 R_LIST_PATHS: /gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TrainingData/Trendy_1_data_CNP/NewRunFromDan12102025/20251201_TRENDY2024_default_ICB1850CNPRDCTCBC.elm.r.0801-01-01-00000.nc
-CLM_PARAMS_PATH: /gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TrainingData/TESSFA_NORTH/ERA5_REF_SURF05/surf_h0_restart_pft/clm_params_c211124.nc
+CLM_PARAMS_PATH: /gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TrainingData/Trendy_1_data_CNP/NewRunFromDan12102025/clm_params.nc
 
-Only for Trendy Case (coupler-bypass)
 DS4_PATH: /global/cfs/cdirs/m4814/daweigao/14_Code/0_dataset_construction/6_all_trendy_original_data/crujra.v2.5.5d_FLDS_1901-2023_z01.nc
 DS5_PATH: /global/cfs/cdirs/m4814/daweigao/14_Code/0_dataset_construction/6_all_trendy_original_data/crujra.v2.5.5d_PSRF_1901-2023_z01.nc
 DS6_PATH: /global/cfs/cdirs/m4814/daweigao/14_Code/0_dataset_construction/6_all_trendy_original_data/crujra.v2.5.5d_FSDS_1901-2023_z01.nc
@@ -28,9 +27,9 @@ FORCING_MODE: legacy
 # DATM forcing parameters (only used when FORCING_MODE=datm)
 # When FORCING_MODE=legacy: These parameters are IGNORED. Use DS4_PATH~DS9_PATH instead.
 # When FORCING_MODE=datm: These parameters are REQUIRED to locate DATM monthly files.
-DATM_ROOT: /gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TrainingData/TESSFA_NORTH/ERA5_REF_SURF05/forcing
-DATM_START_YEAR: 1980
-DATM_END_YEAR: 1999
+DATM_ROOT: /gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TES_SE_dataset/TVA/forcing
+DATM_START_YEAR: 2004
+DATM_END_YEAR: 2023
 
 # DATM_*_TOKEN: Token string used to match DATM monthly file names
 #   - Used when DATM_*_PATH is empty (default behavior)
@@ -55,12 +54,16 @@ DATM_PRECTMMS_PATH:
 DATM_TBOT_PATH:
 
 # Domain and batching
+LAT1: 90
+LAT2: -90
+LON1: 0
+LON2: 360
 BATCH_SIZE: 1000
 
-# Time-series shape (for monthly conversion)  (for TRENDY case)
+# Time-series shape (for monthly conversion)
 TIME_SERIES_LENGTH: 179580
 STEPS_PER_DAY: 4
-YEARS_IN_DATA: 20
+YEARS_IN_DATA: 123
 
 TIME SERIES VARIABLES (Climate Forcing):
 • FLDS, PSRF, FSDS, QBOT, PRECTmms, TBOT

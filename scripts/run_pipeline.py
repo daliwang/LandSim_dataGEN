@@ -64,11 +64,17 @@ def _read_forcing_coords_2d(ds_forcing: nc.Dataset) -> np.ndarray:
     Some forcing files store LATIXY/LONGXY with a time dimension; we only need
     one spatial slice for nearest-neighbor mapping in A_index_core.
     """
-    if "LATIXY" not in ds_forcing.variables or "LONGXY" not in ds_forcing.variables:
-        raise KeyError("Forcing file must include LATIXY and LONGXY.")
+    if "LATIXY" in ds_forcing.variables and "LONGXY" in ds_forcing.variables:
+        lat_name = "LATIXY"
+        lon_name = "LONGXY"
+    elif "lat" in ds_forcing.variables and "lon" in ds_forcing.variables:
+        lat_name = "lat"
+        lon_name = "lon"
+    else:
+        raise KeyError("Forcing file must include LATIXY/LONGXY or lat/lon.")
 
-    lat_var = ds_forcing.variables["LATIXY"]
-    lon_var = ds_forcing.variables["LONGXY"]
+    lat_var = ds_forcing.variables[lat_name]
+    lon_var = ds_forcing.variables[lon_name]
 
     def _slice_without_time(var):
         # Build index tuple dynamically so we do not load full time stacks.
@@ -84,6 +90,9 @@ def _read_forcing_coords_2d(ds_forcing: nc.Dataset) -> np.ndarray:
     lon_data = _slice_without_time(lon_var)
 
     if lat_data.ndim == 1 and lon_data.ndim == 1:
+        if lat_data.size != lon_data.size:
+            lon_grid, lat_grid = np.meshgrid(lon_data, lat_data)
+            return np.column_stack((lat_grid.reshape(-1), lon_grid.reshape(-1)))
         return np.column_stack((lat_data, lon_data))
     if lat_data.ndim == 2 and lon_data.ndim == 2:
         return np.column_stack((lat_data.reshape(-1), lon_data.reshape(-1)))
@@ -157,6 +166,77 @@ def _direct_same_mesh_indices(
     return restart_indices, forcing_indices
 
 
+FORCING_VAR_ALIASES = {
+    "PSRF": ("PSRF", "PBOT"),
+    "PRECTmms": ("PRECTmms", "PRECmms"),
+}
+
+
+def _resolve_forcing_variable(ds: nc.Dataset, var_name: str) -> str:
+    for candidate in FORCING_VAR_ALIASES.get(var_name, (var_name,)):
+        if candidate in ds.variables:
+            return candidate
+    raise KeyError(f"Variable {var_name} not found in forcing file. Tried: {FORCING_VAR_ALIASES.get(var_name, (var_name,))}")
+
+
+def _forcing_series_from_var(var, flat_index: int) -> List[float]:
+    """Return one gridcell forcing series from gridcell/time or time/lat/lon layouts."""
+    dims = list(var.dimensions)
+    lower_dims = [dim.lower() for dim in dims]
+
+    if var.ndim == 2:
+        if "time" in lower_dims:
+            time_axis = lower_dims.index("time")
+            if time_axis == 0:
+                values = var[:, int(flat_index)]
+            else:
+                values = var[int(flat_index), :]
+        else:
+            values = var[int(flat_index), :]
+        return np.asarray(values, dtype=float).reshape(-1).tolist()
+
+    if var.ndim == 3 and "time" in lower_dims:
+        time_axis = lower_dims.index("time")
+        spatial_axes = [axis for axis in range(var.ndim) if axis != time_axis]
+        spatial_shape = tuple(var.shape[axis] for axis in spatial_axes)
+        spatial_indices = np.unravel_index(int(flat_index), spatial_shape)
+
+        slices = [slice(None)] * var.ndim
+        for axis, idx in zip(spatial_axes, spatial_indices):
+            slices[axis] = int(idx)
+        values = var[tuple(slices)]
+        return np.asarray(values, dtype=float).reshape(-1).tolist()
+
+    raise ValueError(f"Unsupported forcing variable layout for {var.name}: dims={var.dimensions}, shape={var.shape}")
+
+
+def _forcing_series_for_indices(var, flat_indices) -> List[List[float]]:
+    """Return forcing series for a batch of nearest forcing indices."""
+    indices = np.asarray(flat_indices, dtype=np.int64)
+    dims = list(var.dimensions)
+    lower_dims = [dim.lower() for dim in dims]
+
+    if var.ndim == 3 and lower_dims == ["time", "lat", "lon"]:
+        n_lon = int(var.shape[2])
+        lat_indices = indices // n_lon
+        lon_indices = indices % n_lon
+        output: List[List[float] | None] = [None] * len(indices)
+
+        # Read all requested longitudes for each latitude in one call.
+        for lat_idx in np.unique(lat_indices):
+            row_positions = np.where(lat_indices == lat_idx)[0]
+            lon_subset = lon_indices[row_positions]
+            values = np.asarray(var[:, int(lat_idx), lon_subset], dtype=float)
+            if values.ndim == 1:
+                values = values[:, np.newaxis]
+            for pos, series in zip(row_positions, values.T):
+                output[int(pos)] = series.reshape(-1).tolist()
+
+        return [series if series is not None else [] for series in output]
+
+    return [_forcing_series_from_var(var, int(idx)) for idx in indices]
+
+
 def load_index_master() -> pd.DataFrame:
     index_path = os.path.join(module_dir("A_index_core"), "index_master.pkl")
     if not os.path.exists(index_path):
@@ -168,15 +248,36 @@ def get_batch_ids(index_df: pd.DataFrame) -> List[int]:
     return sorted(index_df["batch_id"].unique().tolist())
 
 
+def _read_domain_grid(ds: nc.Dataset):
+    """Read lat/lon/mask from either h0-style or surfdata-style grid files."""
+    if {"lat", "lon", "landmask"}.issubset(ds.variables):
+        return ds.variables["lat"][:], ds.variables["lon"][:], ds.variables["landmask"][:]
+
+    if {"LATIXY", "LONGXY"}.issubset(ds.variables):
+        lat_data = np.asarray(ds.variables["LATIXY"][:], dtype=float)
+        lon_data = np.asarray(ds.variables["LONGXY"][:], dtype=float)
+        if lat_data.ndim != 2 or lon_data.ndim != 2:
+            raise ValueError(f"Unsupported LATIXY/LONGXY shapes: {lat_data.shape}, {lon_data.shape}")
+
+        mask_name = "PFTDATA_MASK" if "PFTDATA_MASK" in ds.variables else "LANDFRAC_PFT"
+        if mask_name not in ds.variables:
+            raise KeyError("Surfdata grid file must include PFTDATA_MASK or LANDFRAC_PFT.")
+        mask = np.asarray(ds.variables[mask_name][:]) > 0
+
+        lats = lat_data[:, 0]
+        lons = lon_data[0, :]
+        return lats, lons, mask
+
+    raise KeyError("Domain grid file must include lat/lon/landmask or LATIXY/LONGXY with a mask.")
+
+
 def build_index_core() -> None:
     print("[A_index_core] building...")
     ds2 = nc.Dataset(config.FILE_PATHS["ds2"])
     ds10 = nc.Dataset(config.FILE_PATHS["ds10"])
     ds4 = nc.Dataset(config.FILE_PATHS["ds4"])
     try:
-        lats = ds2.variables["lat"][:]
-        lons = ds2.variables["lon"][:]
-        landmask = ds2.variables["landmask"][:]
+        lats, lons, landmask = _read_domain_grid(ds2)
 
         lat_indices = np.where((lats >= config.LAT2) & (lats <= config.LAT1))[0]
         lon_indices = np.where((lons >= config.LON1) & (lons <= config.LON2))[0]
@@ -338,9 +439,12 @@ def build_ds2_history_x() -> None:
     ds2 = nc.Dataset(config.FILE_PATHS["ds2"])
     try:
         out_dir = module_dir("A_ds2_history_x")
+        landfrac_name = "landfrac" if "landfrac" in ds2.variables else "LANDFRAC_PFT"
+        if landfrac_name not in ds2.variables:
+            raise KeyError("DS2 must include landfrac or LANDFRAC_PFT.")
         for batch_id, batch_df in index_df.groupby("batch_id", sort=True):
             rows = {"__row_id": batch_df["__row_id"].tolist()}
-            landfrac = ds2.variables["landfrac"]
+            landfrac = ds2.variables[landfrac_name]
             if landfrac.ndim == 1:
                 rows["landfrac"] = [float(landfrac[i]) for i in batch_df["lat_idx"]]
             elif landfrac.ndim == 2:
@@ -348,6 +452,9 @@ def build_ds2_history_x() -> None:
             else:
                 raise ValueError(f"Unsupported landfrac shape: {landfrac.shape}")
             for var in config.HISTORY_GRID_VARS_2D:
+                if var not in ds2.variables:
+                    print(f"[A_ds2_history_x] warning: {var} not found in DS2; skipping")
+                    continue
                 arr = ds2.variables[var]
                 if arr.ndim == 2:
                     rows[var] = [float(arr[0, i]) for i in batch_df["lat_idx"]]
@@ -710,14 +817,15 @@ def build_forcing_module(module_name: str, ds_key: str, var_name: str) -> None:
         sources = [source_meta(ds_path), {"mode": "legacy"}]
         try:
             batch_ids = sorted(index_df["batch_id"].unique())
+            actual_var_name = _resolve_forcing_variable(ds, var_name)
+            if actual_var_name != var_name:
+                sources.append({"requested_variable": var_name, "source_variable": actual_var_name})
+            arr = ds.variables[actual_var_name]
             for batch_id, batch_df in index_df.groupby("batch_id", sort=True):
                 print(f"[{module_name}] Processing batch {batch_id}/{batch_ids[-1]}...")
                 rows = {
                     "__row_id": batch_df["__row_id"].tolist(),
-                    var_name: [
-                        np.asarray(ds.variables[var_name][idx, :], dtype=float).tolist()
-                        for idx in batch_df["nearest_forcing_index"]
-                    ],
+                    var_name: _forcing_series_for_indices(arr, batch_df["nearest_forcing_index"]),
                 }
                 pd.DataFrame(rows).to_pickle(os.path.join(out_dir, f"batch_{int(batch_id):02d}.pkl"))
                 print(f"[{module_name}] Saved batch {batch_id}")
@@ -899,10 +1007,13 @@ def assemble_final_dataset() -> None:
         "A_ds1_surface",
         "A_ds2_history_x",
         "A_ds10_restart_x",
-        "A_h0_list_y",
         "A_r_list_y",
         "A_clm_params_pft",
     ] + forcing_modules
+    if config.FILE_PATHS.get("h0_list"):
+        mandatory_modules.insert(3, "A_h0_list_y")
+    else:
+        print("[Assembler] skipping A_h0_list_y because H0_LIST_PATHS is empty.")
 
     # Track missing modules
     missing_modules_summary = {batch_id: [] for batch_id in batch_ids}

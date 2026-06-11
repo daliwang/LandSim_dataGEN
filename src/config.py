@@ -5,7 +5,7 @@ from cnp_data_input_parse import parse_cnp_data_input
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CONFIG_INPUT_FILE = PROJECT_ROOT / "config" / "CNP_dataInput.txt"
+CONFIG_INPUT_FILE = Path(os.environ.get("LANDSIM_CONFIG_FILE", PROJECT_ROOT / "config" / "CNP_dataInput.txt"))
 ACTIVE_CONFIG_INPUT_FILE = str(CONFIG_INPUT_FILE)
 
 # =========================
