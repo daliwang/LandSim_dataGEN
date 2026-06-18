@@ -1,0 +1,31 @@
+# Fast forcing extraction config: uses preprocessed (time, gridcell) files.
+# Generate them first:
+#   python scripts/preprocess_h0_forcing_gridcell.py \
+#     --config-input config/CNP_dataInput_h0_forcing.txt
+
+DATA_ROOT: /projects/hpcl-cli185/proj-shared/wangd/AI4ELM/AI_data/025E3SMV3/data_from_xiaoying
+BASE_OUTPUT_ROOT: /projects/hpcl-cli185/proj-shared/wangd/AI4ELM/AI_data/LandSim_dataGEN_h0_vectorized/output_h0_forcing_0001_0020
+DS1_PATH: ${DATA_ROOT}/surfdata_0.25x0.25_simyr1850_c240125_TOP.nc
+DS2_PATH:
+DS10_PATH: ${DATA_ROOT}/20240214.lndr025_trigrid_top_bgc.IcoswISC30E3r5.chrysalis.adsp.elm.r.0021-01-01-00000.nc
+H0_LIST_PATHS:
+R_LIST_PATHS: ${DATA_ROOT}/20240223.lndr025_trigrid_top_bgc.IcoswISC30E3r5.chrysalis.fnsp.elm.r.0251-01-01-00000.nc
+CLM_PARAMS_PATH: ${DATA_ROOT}/clm_params_c211124.nc
+
+DS4_PATH: /projects/hpcl-cli185/proj-shared/wangd/AI4ELM/AI_data/LandSim_dataGEN_h0_vectorized/output_h0_forcing_0001_0020/forcing_gridcell_preprocessed/FLDS_gridcell.nc
+DS5_PATH: /projects/hpcl-cli185/proj-shared/wangd/AI4ELM/AI_data/LandSim_dataGEN_h0_vectorized/output_h0_forcing_0001_0020/forcing_gridcell_preprocessed/PSRF_gridcell.nc
+DS6_PATH: /projects/hpcl-cli185/proj-shared/wangd/AI4ELM/AI_data/LandSim_dataGEN_h0_vectorized/output_h0_forcing_0001_0020/forcing_gridcell_preprocessed/FSDS_gridcell.nc
+DS7_PATH: /projects/hpcl-cli185/proj-shared/wangd/AI4ELM/AI_data/LandSim_dataGEN_h0_vectorized/output_h0_forcing_0001_0020/forcing_gridcell_preprocessed/QBOT_gridcell.nc
+DS8_PATH: /projects/hpcl-cli185/proj-shared/wangd/AI4ELM/AI_data/LandSim_dataGEN_h0_vectorized/output_h0_forcing_0001_0020/forcing_gridcell_preprocessed/PRECTmms_gridcell.nc
+DS9_PATH: /projects/hpcl-cli185/proj-shared/wangd/AI4ELM/AI_data/LandSim_dataGEN_h0_vectorized/output_h0_forcing_0001_0020/forcing_gridcell_preprocessed/TBOT_gridcell.nc
+
+FORCING_MODE: legacy
+
+LAT1: 90
+LAT2: -90
+LON1: -180
+LON2: 180
+BATCH_SIZE: 1000
+TIME_SERIES_LENGTH: 240
+STEPS_PER_DAY: 1
+YEARS_IN_DATA: 20

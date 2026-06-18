@@ -77,11 +77,17 @@ def _read_forcing_coords_2d(ds_forcing: nc.Dataset) -> np.ndarray:
     Some forcing files store LATIXY/LONGXY with a time dimension; we only need
     one spatial slice for nearest-neighbor mapping in A_index_core.
     """
-    if "LATIXY" not in ds_forcing.variables or "LONGXY" not in ds_forcing.variables:
-        raise KeyError("Forcing file must include LATIXY and LONGXY.")
+    if "LATIXY" in ds_forcing.variables and "LONGXY" in ds_forcing.variables:
+        lat_name = "LATIXY"
+        lon_name = "LONGXY"
+    elif "lat" in ds_forcing.variables and "lon" in ds_forcing.variables:
+        lat_name = "lat"
+        lon_name = "lon"
+    else:
+        raise KeyError("Forcing file must include LATIXY/LONGXY or lat/lon.")
 
-    lat_var = ds_forcing.variables["LATIXY"]
-    lon_var = ds_forcing.variables["LONGXY"]
+    lat_var = ds_forcing.variables[lat_name]
+    lon_var = ds_forcing.variables[lon_name]
 
     def _slice_without_time(var):
         # Build index tuple dynamically so we do not load full time stacks.
@@ -97,6 +103,9 @@ def _read_forcing_coords_2d(ds_forcing: nc.Dataset) -> np.ndarray:
     lon_data = _slice_without_time(lon_var)
 
     if lat_data.ndim == 1 and lon_data.ndim == 1:
+        if lat_data.size != lon_data.size:
+            lon_grid, lat_grid = np.meshgrid(lon_data, lat_data)
+            return np.column_stack((lat_grid.reshape(-1), lon_grid.reshape(-1)))
         return np.column_stack((lat_data, lon_data))
     if lat_data.ndim == 2 and lon_data.ndim == 2:
         return np.column_stack((lat_data.reshape(-1), lon_data.reshape(-1)))
@@ -260,6 +269,90 @@ def _nearest_forcing_indices_by_kdtree(query_coords: np.ndarray, ds_forcing: nc.
         f"max_deg={float(np.max(distances)):.4f}"
     )
     return forcing_indices.astype(np.int64)
+
+
+FORCING_VAR_ALIASES = {
+    "PSRF": ("PSRF", "PBOT"),
+    "PRECTmms": ("PRECTmms", "PRECmms"),
+}
+
+
+def _resolve_forcing_variable(ds: nc.Dataset, var_name: str) -> str:
+    for candidate in FORCING_VAR_ALIASES.get(var_name, (var_name,)):
+        if candidate in ds.variables:
+            return candidate
+    tried = FORCING_VAR_ALIASES.get(var_name, (var_name,))
+    raise KeyError(f"Variable {var_name} not found in forcing file. Tried: {tried}")
+
+
+def _forcing_series_from_var(var, flat_index: int) -> List[float]:
+    """Return one gridcell forcing series from gridcell/time or time/lat/lon layouts."""
+    dims = list(var.dimensions)
+    lower_dims = [dim.lower() for dim in dims]
+
+    if var.ndim == 2:
+        if "time" in lower_dims:
+            time_axis = lower_dims.index("time")
+            values = var[:, int(flat_index)] if time_axis == 0 else var[int(flat_index), :]
+        else:
+            values = var[int(flat_index), :]
+        return np.asarray(values, dtype=float).reshape(-1).tolist()
+
+    if var.ndim == 3 and "time" in lower_dims:
+        time_axis = lower_dims.index("time")
+        spatial_axes = [axis for axis in range(var.ndim) if axis != time_axis]
+        spatial_shape = tuple(var.shape[axis] for axis in spatial_axes)
+        spatial_indices = np.unravel_index(int(flat_index), spatial_shape)
+        slices = [slice(None)] * var.ndim
+        for axis, idx in zip(spatial_axes, spatial_indices):
+            slices[axis] = int(idx)
+        values = var[tuple(slices)]
+        return np.asarray(values, dtype=float).reshape(-1).tolist()
+
+    raise ValueError(f"Unsupported forcing variable layout for {var.name}: dims={var.dimensions}, shape={var.shape}")
+
+
+def _is_gridcell_forcing_var(var) -> bool:
+    """True when forcing is stored as (time, gridcell) aligned with index_master rows."""
+    if var.ndim != 2:
+        return False
+    lower_dims = [dim.lower() for dim in var.dimensions]
+    return lower_dims == ["time", "gridcell"]
+
+
+def _forcing_bulk_gridcell_series(var, row_ids) -> List[List[float]]:
+    """Vectorized extraction for preprocessed (time, gridcell) forcing."""
+    idx_arr = np.asarray(row_ids, dtype=np.int64)
+    dims = [dim.lower() for dim in var.dimensions]
+    if dims != ["time", "gridcell"]:
+        raise ValueError(f"Expected (time, gridcell), got {var.dimensions}")
+    data_2d = np.asarray(var[:, idx_arr], dtype=float).T
+    return data_2d.tolist()
+
+
+def _forcing_series_for_indices(var, flat_indices) -> List[List[float]]:
+    """Return forcing series for a batch of nearest forcing indices."""
+    indices = np.asarray(flat_indices, dtype=np.int64)
+    lower_dims = [dim.lower() for dim in var.dimensions]
+
+    if var.ndim == 3 and lower_dims == ["time", "lat", "lon"]:
+        n_lon = int(var.shape[2])
+        lat_indices = indices // n_lon
+        lon_indices = indices % n_lon
+        output = [None] * len(indices)
+
+        for lat_idx in np.unique(lat_indices):
+            row_positions = np.where(lat_indices == lat_idx)[0]
+            lon_subset = lon_indices[row_positions]
+            values = np.asarray(var[:, int(lat_idx), lon_subset], dtype=float)
+            if values.ndim == 1:
+                values = values[:, np.newaxis]
+            for pos, series in zip(row_positions, values.T):
+                output[int(pos)] = series.reshape(-1).tolist()
+
+        return [series if series is not None else [] for series in output]
+
+    return [_forcing_series_from_var(var, int(idx)) for idx in indices]
 
 
 def load_index_master() -> pd.DataFrame:
@@ -1060,6 +1153,9 @@ def build_forcing_module(module_name: str, ds_key: str, var_name: str) -> None:
                 f"samples={len(index_df)}, grid_axis={grid_axis}, index_source={forcing_index_source}"
             )
             for batch_id, batch_df in index_work.groupby("batch_id", sort=True):
+                if module_batch_exists(module_name, int(batch_id)):
+                    print(f"[{module_name}] Skipping existing batch {batch_id}/{batch_ids[-1]}...")
+                    continue
                 print(f"[{module_name}] Processing batch {batch_id}/{batch_ids[-1]}...")
                 idx_arr = batch_df["_forcing_idx"].to_numpy(dtype=np.int64)
                 if grid_axis == 1:
@@ -1082,14 +1178,26 @@ def build_forcing_module(module_name: str, ds_key: str, var_name: str) -> None:
         sources = [source_meta(ds_path), {"mode": "legacy"}]
         try:
             batch_ids = sorted(index_df["batch_id"].unique())
+            actual_var_name = _resolve_forcing_variable(ds, var_name)
+            if actual_var_name != var_name:
+                sources.append({"requested_variable": var_name, "source_variable": actual_var_name})
+            arr = ds.variables[actual_var_name]
+            use_gridcell_bulk = _is_gridcell_forcing_var(arr)
+            if use_gridcell_bulk:
+                print(f"[{module_name}] using vectorized (time, gridcell) legacy extraction")
+                sources.append({"mode": "legacy_gridcell_bulk"})
             for batch_id, batch_df in index_df.groupby("batch_id", sort=True):
+                if module_batch_exists(module_name, int(batch_id)):
+                    print(f"[{module_name}] Skipping existing batch {batch_id}/{batch_ids[-1]}...")
+                    continue
                 print(f"[{module_name}] Processing batch {batch_id}/{batch_ids[-1]}...")
+                if use_gridcell_bulk:
+                    series = _forcing_bulk_gridcell_series(arr, batch_df["__row_id"])
+                else:
+                    series = _forcing_series_for_indices(arr, batch_df["nearest_forcing_index"])
                 rows = {
                     "__row_id": batch_df["__row_id"].tolist(),
-                    var_name: [
-                        np.asarray(ds.variables[var_name][idx, :], dtype=float).tolist()
-                        for idx in batch_df["nearest_forcing_index"]
-                    ],
+                    var_name: series,
                 }
                 pd.DataFrame(rows).to_pickle(os.path.join(out_dir, f"batch_{int(batch_id):02d}.pkl"))
                 print(f"[{module_name}] Saved batch {batch_id}")
@@ -1100,12 +1208,34 @@ def build_forcing_module(module_name: str, ds_key: str, var_name: str) -> None:
     print(f"[{module_name}] done.")
 
 
-def _build_grid_maps(ds10: nc.Dataset) -> Dict[str, Dict[int, np.ndarray]]:
+def _group_positions_by_grid_id(index_values, needed_ids: set) -> Dict[int, np.ndarray]:
+    index_values = np.asarray(index_values, dtype=np.int64)
+    needed = np.fromiter((int(grid_id) for grid_id in needed_ids), dtype=np.int64)
+    if needed.size == 0:
+        return {}
+
+    selected = np.isin(index_values, needed)
+    positions = np.nonzero(selected)[0]
+    if positions.size == 0:
+        return {}
+
+    selected_ids = index_values[positions]
+    order = np.argsort(selected_ids, kind="mergesort")
+    sorted_ids = selected_ids[order]
+    sorted_positions = positions[order]
+    split_points = np.nonzero(np.diff(sorted_ids))[0] + 1
+    position_groups = np.split(sorted_positions, split_points)
+    id_groups = np.split(sorted_ids, split_points)
+
+    return {int(ids[0]): group.astype(np.int64, copy=False) for ids, group in zip(id_groups, position_groups)}
+
+
+def _build_grid_maps(ds10: nc.Dataset, gridcell_ids) -> Dict[str, Dict[int, np.ndarray]]:
+    needed_ids = {int(grid_id) for grid_id in gridcell_ids}
     pft_gridcell_index = ds10.variables["pfts1d_gridcell_index"][:]
     col_gridcell_index = ds10.variables["cols1d_gridcell_index"][:]
-    unique_ids = np.unique(pft_gridcell_index)
-    pft_map = {int(grid_id): np.where(pft_gridcell_index == grid_id)[0] for grid_id in unique_ids}
-    col_map = {int(grid_id): np.where(col_gridcell_index == grid_id)[0] for grid_id in unique_ids}
+    pft_map = _group_positions_by_grid_id(pft_gridcell_index, needed_ids)
+    col_map = _group_positions_by_grid_id(col_gridcell_index, needed_ids)
     return {"pft_map": pft_map, "col_map": col_map}
 
 
@@ -1114,17 +1244,20 @@ def build_ds10_restart_x() -> None:
     index_df = load_index_master()
     ds10 = nc.Dataset(config.FILE_PATHS["ds10"])
     try:
-        maps = _build_grid_maps(ds10)
+        maps = _build_grid_maps(ds10, index_df["gridcell_id"])
         pft_map = maps["pft_map"]
         col_map = maps["col_map"]
         out_dir = module_dir("A_ds10_restart_x")
 
         all_vars = config.RESTART_PFT_VARS + config.RESTART_COL_1D_VARS + config.RESTART_COL_2D_VARS
-        x_values = {var: ds10.variables[var][:] for var in all_vars}
+        x_values = {var: ds10.variables[var] for var in all_vars}
 
         batch_groups = list(index_df.groupby("batch_id", sort=True))
         total_batches = len(batch_groups)
         for batch_pos, (batch_id, batch_df) in enumerate(batch_groups, start=1):
+            if module_batch_exists("A_ds10_restart_x", int(batch_id)):
+                _log_batch_progress("A_ds10_restart_x", batch_pos, total_batches, int(batch_id))
+                continue
             _log_batch_progress("A_ds10_restart_x", batch_pos, total_batches, int(batch_id))
             rows: Dict[str, List] = {"__row_id": batch_df["__row_id"].tolist()}
             for var in all_vars:
@@ -1157,17 +1290,20 @@ def build_r_list_y() -> None:
         raise ValueError("FILE_PATHS['r_list'] is empty. Please provide one r file path.")
     ds_r = nc.Dataset(r_paths[0])
     try:
-        maps = _build_grid_maps(ds10)
+        maps = _build_grid_maps(ds10, index_df["gridcell_id"])
         pft_map = maps["pft_map"]
         col_map = maps["col_map"]
         out_dir = module_dir("A_r_list_y")
 
         all_vars = config.RESTART_PFT_VARS + config.RESTART_COL_1D_VARS + config.RESTART_COL_2D_VARS
-        y_values = {var: ds_r.variables[var][:] for var in all_vars}
+        y_values = {var: ds_r.variables[var] for var in all_vars}
 
         batch_groups = list(index_df.groupby("batch_id", sort=True))
         total_batches = len(batch_groups)
         for batch_pos, (batch_id, batch_df) in enumerate(batch_groups, start=1):
+            if module_batch_exists("A_r_list_y", int(batch_id)):
+                _log_batch_progress("A_r_list_y", batch_pos, total_batches, int(batch_id))
+                continue
             _log_batch_progress("A_r_list_y", batch_pos, total_batches, int(batch_id))
             rows: Dict[str, List] = {"__row_id": batch_df["__row_id"].tolist()}
             for var in all_vars:
@@ -1218,6 +1354,9 @@ def build_clm_params_pft() -> None:
         batch_groups = list(index_df.groupby("batch_id", sort=True))
         total_batches = len(batch_groups)
         for batch_pos, (batch_id, batch_df) in enumerate(batch_groups, start=1):
+            if module_batch_exists("A_clm_params_pft", int(batch_id)):
+                _log_batch_progress("A_clm_params_pft", batch_pos, total_batches, int(batch_id))
+                continue
             _log_batch_progress("A_clm_params_pft", batch_pos, total_batches, int(batch_id))
             rows = {"__row_id": batch_df["__row_id"].tolist()}
             for var, val_list in broadcast_feature_dict.items():

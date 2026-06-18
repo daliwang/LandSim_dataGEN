@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from typing import Optional
 
 from cnp_data_input_parse import parse_cnp_data_input
 
@@ -250,7 +251,7 @@ def _apply_cnp_data_input_overrides(config_path: str) -> None:
         PFT_TARGET_VARS = normalized
 
 
-def load_config(config_input_file: str | None = None) -> None:
+def load_config(config_input_file: Optional[str] = None) -> None:
     """
     Load or reload configuration from a CNP_dataInput-style text file.
 
