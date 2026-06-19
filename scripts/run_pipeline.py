@@ -1374,8 +1374,12 @@ def calculate_monthly_avg(time_series):
         return []
     if len(time_series) == 0:
         return []
-    # Already monthly sequence (e.g. DATM preprocessed forcing): keep as-is.
-    if len(time_series) % 12 == 0 and len(time_series) != config.TIME_SERIES_LENGTH:
+    expected_monthly_len = int(config.YEARS_IN_DATA) * 12
+    # Already monthly (h0 forcing, DATM preprocessed, etc.): keep as-is.
+    if len(time_series) % 12 == 0 and (
+        len(time_series) == expected_monthly_len
+        or len(time_series) != config.TIME_SERIES_LENGTH
+    ):
         return [float(x) for x in np.asarray(time_series, dtype=float).reshape(-1).tolist()]
     if len(time_series) != config.TIME_SERIES_LENGTH:
         return []

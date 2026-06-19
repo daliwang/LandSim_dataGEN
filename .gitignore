@@ -8,4 +8,6 @@ data/
 output/
 logs/
 output2/
+output_h0_forcing_*/
+records/
 

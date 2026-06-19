@@ -51,12 +51,12 @@ echo "[2/3] Build remaining forcing modules with vectorized legacy path..."
 
 echo "[3/3] Assemble final dataset..."
 "${PYTHON_BIN}" scripts/run_pipeline.py \
-  --config-input "${BASE_CONFIG}" \
+  --config-input "${GRIDCELL_CONFIG}" \
   --assemble
 
 if [[ "${VALIDATE}" == "1" ]]; then
   "${PYTHON_BIN}" scripts/validate_final_dataset.py \
-    --config-input "${BASE_CONFIG}"
+    --config-input "${GRIDCELL_CONFIG}"
 fi
 
 echo "Done."
